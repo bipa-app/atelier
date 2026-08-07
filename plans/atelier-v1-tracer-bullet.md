@@ -1,7 +1,7 @@
 # Plan: atelier v1 — tracer bullet
 
 > **Source PRD**: `plans/prd-atelier.md`
-> **Linear project**: https://linear.app/bipa/project/atelier-6df1165b35cf (team ENG · PRD ENG-9651 · M0–M4 = ENG-9652…9656)
+> **Linear project**: https://linear.app/bipa/project/atelier-6df1165b35cf (team ENG · PRD ENG-9651 · M0–M4 = ENG-9652…9656 · M5 backlog = ENG-9657)
 > **Status**: Approved
 > **Owner**: Luiz Parreira
 
