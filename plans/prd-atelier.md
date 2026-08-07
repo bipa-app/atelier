@@ -61,4 +61,4 @@ An open-source toolkit — a Rust SDK, an MCP/HTTP server, and the `ws` CLI, all
 - Rich differs (xlsx, pdf) — the ladder makes them additive later.
 - Hosted / multi-node runtime (celld or Cloudflare DO deployment) — local-first daemon first.
 - WASM plugin ABI — in-process crates until third-party packages exist.
-- crates.io publishing and the GitHub org decision (bipa-app vs personal).
+- crates.io publishing (names `atelier`/`atelier_core` are taken; publish prefix decided later).
