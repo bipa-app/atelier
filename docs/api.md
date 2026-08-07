@@ -1,8 +1,8 @@
 # atelier API design
 
-> Status: draft for review · Vocabulary: `CONTEXT.md` · Ground rules: ADR-0006 (one core, three faces — every capability lands in the SDK first; CLI, MCP, and HTTP are thin shells with no shell-only behavior).
+> Status: v2, decisions of 2026-08-07 folded in · Vocabulary: `CONTEXT.md` · Ground rules: ADR-0006 (one core, three faces), ADR-0007 (gated landing), ADR-0008 (coordination port).
 
-The API speaks the glossary, never the engine: `Workspace`, `Source`, `Snapshot`, `Change`, `Working Copy`, `Session`, `Lease`, `Landing`, `Journal`, `Diff`, `Delta`. jj types never cross the public boundary.
+The API speaks the glossary, never the engine: `Workspace`, `Source`, `Boundary`, `Snapshot`, `Change`, `Working Copy`, `Session`, `Landing Request`, `Approval`, `Journal`, `Diff`, `Delta`. jj types never cross the public boundary.
 
 ## 1. SDK (Rust) — the product
 
@@ -10,18 +10,20 @@ The API speaks the glossary, never the engine: `Workspace`, `Source`, `Snapshot`
 
 ```rust
 Workspace                    // handle to an open workspace
-Source      { id, kind: RemoteGit|LocalGit|LocalFolder|RemoteFolder, endpoint, mount, sync_policy }
-SyncPolicy  { ImportOnce | Mirror | TwoWay }
-Snapshot    { id, actor, at, parents }
-Change      { id, description, snapshots }        // stable identity across rewrites
-WorkingCopy { path, change }                      // a real directory on disk
-Session     { id, actor, instruction, working_copy, state: Open|Landed|Abandoned }
-Instruction { summary, run_ref, verbatim: Option<String> }   // persistence per profile (ADR-0004)
-Actor       { id, kind: Human|Agent|Automation, name }
-Diff        { fidelity: Rich|Text|Binary, deltas: Vec<Delta> }
-Delta       { address, kind: Added|Removed|Changed|Moved, before, after, summary }
-JournalEntry{ at, actor, act, session, refs }     // append-only
-Manifest    // rendered self-description: identity, profile, sources, discipline, current state
+Source        { id, kind: RemoteGit|LocalGit|LocalFolder|RemoteFolder, endpoint, mount, sync_policy }
+SyncPolicy    { ImportOnce | Mirror | TwoWay }
+Snapshot      { id, actor, at, parents }
+Change        { id, description, snapshots }        // stable identity across rewrites
+WorkingCopy   { path, change }                      // a real directory on disk
+Session       { id, actor, instruction, working_copy, state: Open|Landed|Abandoned }
+Instruction   { summary, run_ref, verbatim: Option<String> }   // persistence per profile (ADR-0004)
+Actor         { id, kind: Human|Agent|Automation, name }
+LandingRequest{ id, change, requester, approvals, state: Open|Approved|Landed|Parked|Rejected|Abandoned }
+Approval      { actor, at }
+Diff          { fidelity: Rich|Text|Binary, deltas: Vec<Delta> }
+Delta         { address, kind: Added|Removed|Changed|Moved, before, after, summary }
+JournalEntry  { at, actor, act, session, refs }     // append-only
+Manifest      // rendered self-description: identity, profile, sources, boundary, discipline, state
 ```
 
 ### Surface (grouped)
@@ -30,18 +32,26 @@ Manifest    // rendered self-description: identity, profile, sources, discipline
 // Lifecycle
 Workspace::init(path, opts) -> Workspace
 Workspace::open(path) -> Workspace
-ws.attach(SourceSpec) -> Source            // v1: one LocalFolder source; API shaped for many (mount points)
+ws.attach(SourceSpec) -> Source            // v1: one LocalFolder source; API shaped for many (mounts)
 ws.detach(source_id)
-ws.status() -> Status                      // head, dirty paths, open sessions, sources
+ws.status() -> Status                      // head, dirty paths, open sessions/requests, sources
 ws.manifest() -> Manifest                  // the read model an actor consumes first
 
 // Sessions (the agent write path)
 ws.open_session(actor, Instruction) -> Session    // always: own WorkingCopy + own Change
-session.snapshot() -> Snapshot                    // explicit; any SDK op also auto-snapshots first
+session.snapshot() -> Snapshot                    // explicit; any SDK op auto-snapshots first
 session.diff() -> Diff                            // change vs shared line
-session.land() -> Landed | Parked(Conflict)       // acquires landing lease internally
+session.request_land() -> LandingRequest          // opens the gate's object; never lands directly
 session.abandon()                                 // work stays in history; session closed
-ws.sessions() -> Vec<Session>                     // durable; survives process restarts
+ws.sessions() -> Vec<Session>                     // durable; survive process restarts
+
+// Landing requests (ADR-0007)
+ws.landing_requests(filter) -> Vec<LandingRequest>
+lr.approve(actor) -> GateState                    // agents and humans approve alike
+lr.reject(actor, reason)
+// gate satisfied => apply runs: lease -> rebase -> advance, or Parked(Conflict)
+session.land() -> Landed | PendingApproval(LandingRequest) | Parked(Conflict)
+                                                  // sugar: request + self-approve where policy allows
 
 // History & recovery
 ws.log(range) -> Vec<Snapshot>
@@ -49,40 +59,53 @@ ws.diff_between(a, b, paths) -> Diff
 ws.undo(op_ref)                                   // op-log undo, journaled as its own act
 
 // Journal (read; writes are internal to every mutating op)
-ws.journal(JournalQuery) -> Vec<JournalEntry>     // by actor, session, path, time range
+ws.journal(JournalQuery) -> Vec<JournalEntry>     // by actor, session, path, time, act kind
 
-// Documents
-ws.project(path_or_blob) -> Projection            // cached by (blob, package, version)
-registry.packages() -> Vec<PackageId>             // detection: highest confidence wins; ties break by package id
+// Documents & reading (artifact-style; see §2.1)
+ws.read(Address, Window, View) -> ReadResult
+ws.project(Address) -> Projection                 // cached by (blob, package, version)
+registry.packages() -> Vec<PackageId>
 
 // Watch (M3)
-ws.watch(opts) -> impl Stream<Item = WatchEvent>  // shells decide foreground/daemon
+ws.watch(opts) -> impl Stream<Item = WatchEvent>
 ```
 
-### Leases are internal
+### Coordination is a port (ADR-0008)
 
-`land` is the only serialization point; the lease is acquired inside it and is **not** a public verb. Exposed read-only via `status()` for observability. Editing never leases (glossary rule).
+The landing lease, request state, and journal writes go through one coordination port. Local implementation: SQLite (WAL) — atomic claim in a transaction, TTL column, correct across CLI + server processes. Hosted implementation later: a single-writer durable-object cell (celld / Cloudflare DO), one cell per workspace. No bespoke coordination, ever. Leases stay internal — `approve`/`land` acquire them; `status()` exposes them read-only.
 
 ### Errors (typed; the contract includes failure)
 
-`NotAWorkspace` · `AlreadyAttached` · `NestedWorkspace` · `LfsSourceUnsupported` (ADR-0002, attach-time) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { change, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `JournalLocked`
+`NotAWorkspace` · `AlreadyAttached` · `NestedWorkspace` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }`
 
 ## 2. MCP (agent face)
 
-Tools, all thin over the SDK; explicit ids in every call (no connection-session state, so reconnects are safe):
+Tools, thin over the SDK; explicit ids in every call (reconnect-safe):
 
 | Tool | Args | Returns |
 |---|---|---|
-| `manifest` | — | workspace self-description (read this first) |
+| `manifest` | — | self-description (read this first) |
 | `open_session` | actor, instruction{summary, run_ref, verbatim?} | session_id, working_copy_path, change_id |
-| `read` | session_id, path | content (fs-sandboxed agents cannot read the working copy directly) |
+| `read` | address, window?, view? | windowed content + continuation (§2.1) |
 | `write` | session_id, path, content | snapshot_id |
-| `diff` | session_id (or from/to) | Diff (rendered per fidelity) |
-| `land` | session_id | landed{snapshot} \| parked{conflicts} |
+| `diff` | session_id (or from/to), path? | Diff, rendered per fidelity; large diffs windowed (§2.1) |
+| `request_land` | session_id | request_id, gate state |
+| `approve` / `reject` | request_id, reason? | gate state → landed \| pending \| parked |
+| `land` | session_id | landed \| pending_approval{request_id} \| parked{conflicts} |
+| `landing_requests` | filter | open/parked requests with diffs summaries |
 | `journal` | query | entries |
 | `abandon` | session_id | ok |
 
-stdio transport in M2; MCP streamable HTTP in M5 (same tools — reach, not capability).
+stdio in M2; MCP streamable HTTP in M5 — same tools, reach not capability.
+
+### 2.1 Read protocol (artifact-style)
+
+Modeled on an internal artifact substrate: bounded inline output, stable addresses, windowed recovery.
+
+- **Every read is windowed.** Default window ~50KB / N lines; response carries `{content, window: {start, end, total}, next?}`. `next` is the continuation cursor. No unbounded responses exist on the surface.
+- **Addresses are stable.** `path` (live working copy, via session_id) · `path@<snapshot>` (immutable) · `blob:<hash>` (immutable, content-addressed). Immutable addresses are agent-cacheable forever.
+- **Projection is the default view for non-text.** `read report.docx` returns its markdown projection (the text face agents want); `view=raw` returns bytes (base64, windowed). The projection's own address is stable: `(blob, package, version)`.
+- **Oversized tool results spill, never truncate silently.** A huge diff returns head + tail + `[... elided ...]` + a stable address to window through — byte-identical recovery, like `artifact://`.
 
 ## 3. HTTP REST (M5, programmatic face)
 
@@ -90,68 +113,72 @@ stdio transport in M2; MCP streamable HTTP in M5 (same tools — reach, not capa
 POST /v1/workspaces                       init/attach
 GET  /v1/workspaces/{ws}                  status + manifest
 POST /v1/workspaces/{ws}/sessions         open (actor, instruction)
-GET  /v1/workspaces/{ws}/sessions/{s}/files/{path}
+GET  /v1/workspaces/{ws}/sessions/{s}/files/{path}?start=&limit=&view=   (windowed)
 PUT  /v1/workspaces/{ws}/sessions/{s}/files/{path}
-POST /v1/workspaces/{ws}/sessions/{s}/land
+POST /v1/workspaces/{ws}/sessions/{s}/request-land
+POST /v1/workspaces/{ws}/requests/{r}/approve | /reject
+GET  /v1/workspaces/{ws}/requests?state=open
 POST /v1/workspaces/{ws}/sessions/{s}/abandon
 GET  /v1/workspaces/{ws}/diff?from=&to=&path=
 GET  /v1/workspaces/{ws}/journal?actor=&since=&path=
 ```
 
-Localhost bind by default; non-localhost requires an explicit flag; auth is a dedicated pre-exposure slice.
+Localhost bind by default; non-localhost needs an explicit flag; auth is a dedicated pre-exposure slice.
 
 ## 4. CLI (human face)
 
-`ws init` · `ws attach <src>` · `ws status` · `ws manifest` · `ws log` · `ws diff [--from --to] [path]` · `ws journal [--actor --since]` · `ws sessions [--abandon <id>]` · `ws land <session>` · `ws watch` · `ws undo <op>` · `ws serve [--mcp-stdio | --http]`
+`ws init` · `ws attach <src>` · `ws status` · `ws manifest` · `ws log` · `ws diff` · `ws journal` · `ws sessions` · `ws requests` · `ws approve <id>` · `ws reject <id>` · `ws land <session>` · `ws watch` · `ws undo <op>` · `ws serve [--mcp-stdio | --http]`
+
+The human review flow is the v1 demo: agent `request_land`s → human runs `ws requests`, reads the docx diff as markdown, `ws approve` → change lands.
 
 ## 5. Configuration
 
-Two artifacts with different natures:
-
 - **Config is input.** Global `~/.config/atelier/config.toml` (who am I) ⊂ workspace `.atelier/config.toml` (what this workspace is) ⊂ per-invocation flags. Precedence: invocation > workspace > global.
-- **Manifest is output.** `ws manifest` renders config + live state (head, sources, discipline, open sessions). Never hand-edited.
+- **Manifest is output.** `ws manifest` renders config + live state. Never hand-edited.
 
 ```toml
 # global
-[actor]           name = "luiz"        kind = "human"
+[actor]     name = "luiz"   kind = "human"
 
 # workspace
-[workspace]       name = "deals-q3"    profile = "default"
-[snapshot]        max_file_size = "50MB"   debounce_ms = 500
-[boundary]        ignore = [".DS_Store", ".env*", "node_modules/"]
-[journal]         instruction_fidelity = "summary"   # profile-driven; "verbatim" in audit profiles
-[[source]]        kind = "local-folder"  path = "."  sync = "two-way"  mount = "/"
-[packages]        pins = { "format-docx" = "0.1" }
+schema = 1
+[workspace] name = "deals-q3"   profile = "default"
+[snapshot]  max_file_size = "50MB"   debounce_ms = 500
+[boundary]  ignore = [".DS_Store", ".env*", "node_modules/"]
+[journal]   instruction_fidelity = "summary"        # "verbatim" in audit profiles
+[landing]   approvals = 1   allow_self_approve = true   dismiss_approvals_on_new_snapshots = true
+[[source]]  kind = "local-folder"  path = "."  sync = "two-way"  mount = "/"
+[packages]  pins = { "format-docx" = "0.1" }
 ```
 
-Schema versioning from day one: `schema = 1` in config; SQLite `user_version` for the journal; MCP tools carry a `version` in `manifest`.
+Schema versioning from day one: `schema = 1`; SQLite `user_version` for the journal; `manifest` reports surface version.
 
 ## 6. Edge-case catalog
 
-### Sessions & landing
-- **Shared line moved since session start** → land rebases (jj auto-rebase). Clean → advance. Conflict → **the land parks**: the Conflict is recorded on the change, the session stays open, the journal records the parked attempt, and the caller gets `LandParkedOnConflict`. **Invariant: the shared line is always conflict-free** — a materialized conflict inside a docx would be nonsense; conflicts live on changes, resolution is a follow-up task.
-- **Concurrent lands** → exactly one lease holder; the loser gets `LeaseHeld { holder, expires }` and retries after. Refuse, don't queue (observable, simple, fair enough at v1 scale).
-- **Crash mid-session** → sessions are durable rows + real directories; `ws sessions` lists them; reopen by id; stale sessions warn after TTL but are never auto-deleted (ADR-0001: work is never lost silently).
-- **Lease holder crashes** → TTL expiry frees it; the parked land is retryable.
-- **Working copy manually deleted** → session flagged broken; change and snapshots survive in history.
+### Landing requests & concurrency
+- **Shared line moved; rebase conflicts** → the apply parks the request (`Parked`), Conflict recorded on the change, session stays open, journal records the parked attempt. **Invariant: the shared line is always conflict-free.**
+- **New snapshots after approval** → approvals dismissed (default policy; audit profiles always); request returns to `Open`, journal records the dismissal.
+- **Approver = requester** → allowed in default profile, `SelfApprovalForbidden` in audit profiles.
+- **Concurrent applies** → one lease holder (SQLite claim); loser sees `LeaseHeld { holder, expires }` and retries. Requests queue naturally as open objects — only the apply serializes.
+- **Approve a parked request** → refused; resolve the conflict (follow-up session), new snapshot re-opens the gate.
+- **Crash mid-session / mid-apply** → sessions and requests are durable rows + real directories; `ws sessions` / `ws requests` list them; lease TTL frees a dead holder; nothing is auto-deleted.
 
 ### Snapshots, boundary & watch
-- **Huge file** → `FileTooLarge` skip: recorded in the journal, file listed in status as outside-boundary until config raises the limit. Snapshot of everything else proceeds.
-- **Secrets (.env)** → default ignores. Sharpened rule: **ignores define the content boundary, not unversioned state** — an ignored path is *outside the workspace*; ADR-0001 applies inside the boundary. Boundary changes are journaled acts.
-- **Editor atomic-save (write-temp-rename)** and event storms (`npm install`) → debounce + batch into one snapshot; default ignores carry the usual offenders.
-- **Symlinks / empty dirs / case-insensitive fs** → follow git semantics (they are the boundary contract); document, don't fight.
+- **Huge file** → `FileTooLarge` skip, journaled, path listed outside-boundary until config raises the limit; the rest of the snapshot proceeds.
+- **Secrets (.env)** → default ignores. Rule: **ignores define the Boundary** — outside the workspace, not unversioned inside it (glossary: Boundary). Boundary changes are journaled acts.
+- **Editor atomic-save, event storms** → debounce + batch into one snapshot; default ignores carry the usual offenders.
+- **Symlinks / empty dirs / case-insensitive fs** → git semantics; document, don't fight.
 
 ### Attach
-- Folder already a git repo → that's the LocalGit source kind: preserve history, colocate. Already a jj repo → adopt. **Inside another workspace → refuse** (`NestedWorkspace`). LFS in a git source → refuse loudly (ADR-0002). Attach same source twice → `AlreadyAttached`.
+- Folder already a git repo → LocalGit source: preserve history, colocate. Already jj → adopt. Inside another workspace → `NestedWorkspace`. LFS git source → loud `LfsSourceUnsupported` (ADR-0002). Re-attach → `AlreadyAttached`.
 
 ### Documents & packages
-- **Corrupt/encrypted docx** → projector error never fails the diff: fall to binary rung, `PackageFailed { fell_back_to }` recorded in the journal.
-- **Package panic** → caught at the package boundary (`catch_unwind`); a bad package degrades fidelity, never kills the process.
-- **Two packages claim a file** → highest detect-confidence wins; ties break deterministically by package id.
-- **Rename + edit** → delta kind `Moved` with content diff; follows the engine's rename detection.
+- **Corrupt/encrypted doc** → never fails a diff: binary rung + `PackageFailed { fell_back_to }` journaled.
+- **Package panic** → caught at the boundary; degrades fidelity, never kills the process.
+- **Two packages claim a file** → highest detect confidence; ties break by package id.
+- **Rename + edit** → `Moved` delta with content diff, engine rename detection.
 
 ### Journal & multi-process
-- **CLI and server running at once** → SQLite WAL handles concurrent writers for the journal. But an in-memory lease would split into two lease-worlds — so **the lease is a SQLite row** (atomic claim in a transaction, TTL column), multi-process-correct from day one. This amends M2's "in-process TTL lease" wording.
-- **No actor configured** → every mutating op refuses with `NoActorConfigured` + setup hint. No anonymous acts, ever.
-- **Instruction hygiene** → caller supplies `Instruction`; the profile decides what persists (default drops `verbatim`). The journal records what it was given — attribution is the caller's honesty plus the actor identity.
-```
+- **CLI + server concurrently** → journal via SQLite WAL; lease and request state via the same coordination port (ADR-0008) — one lease-world across processes.
+- **No actor configured** → mutating ops refuse (`NoActorConfigured`). No anonymous acts, ever.
+- **Instruction hygiene** → caller supplies `Instruction`; profile decides persistence (default drops `verbatim`). The journal records what it was given.
