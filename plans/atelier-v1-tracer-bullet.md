@@ -13,11 +13,12 @@ Bipa has built three ad-hoc agent workspaces (Buzz's R2 git server, bip's worksp
 
 ```yaml
 project: atelier
-remote: none yet            # GitHub org decision (bipa-app vs personal) pending
+remote: https://github.com/bipa-app/atelier
 local_default_path: ~/bip/projects/atelier
 git_strategy: worktree
 base_branch: main
 branch_naming: feat/<slug>
+delivery: push feat branch, open a PR, rebase-merge (linear history); never push main directly
 ```
 
 ## Architectural decisions
@@ -42,7 +43,7 @@ Recorded as ADRs in `docs/adr/`; vocabulary in `CONTEXT.md`. Durable across all 
 - Rich differs (xlsx, pdf) — additive by design of the ladder.
 - Hosted / multi-node runtime (celld / Cloudflare DO) — local-first daemon first; the domain never depends on it.
 - WASM plugin ABI — in-process crates until third-party packages exist.
-- crates.io publishing; GitHub org + remote push — pending the org decision.
+- crates.io publishing — names `atelier`/`atelier_core` are taken; publish prefix is a deferred decision.
 
 ## Holistic scope
 
