@@ -17,3 +17,10 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tempfile = "3"
+jj-lib = "=0.44.0"
+pollster = "0.4"
+futures = "0.3"
+gix-hash = "0.25"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
