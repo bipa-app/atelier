@@ -6,6 +6,7 @@ mod error;
 mod journal;
 mod workspace;
 
+pub use atelier_diff_core::{Address, Delta, DeltaKind, Diff, Fidelity};
 pub use error::Error;
 pub use journal::JournalEntry;
 pub use workspace::{Snapshot, Source, Workspace};
