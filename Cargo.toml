@@ -16,6 +16,8 @@ license = "Apache-2.0"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 jj-lib = "=0.44.0"
 pollster = "0.4"
