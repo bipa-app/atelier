@@ -1,0 +1,114 @@
+use std::path::Path;
+
+use rusqlite::{Connection, params};
+
+use crate::error::{Error, engine_err};
+
+/// One record in a workspace's journal: who did what, and any intent behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub at_ms: i64,
+    pub actor_name: String,
+    pub actor_kind: String,
+    pub act: String,
+    pub session: Option<String>,
+    pub instruction_summary: Option<String>,
+    pub instruction_run_ref: Option<String>,
+    pub instruction_verbatim: Option<String>,
+    pub reference: Option<String>,
+}
+
+/// The append-only journal, a SQLite database beside the repo.
+pub struct Journal {
+    conn: Connection,
+}
+
+impl Journal {
+    /// Open (creating if absent) the journal at `path` and ensure its schema.
+    pub fn open(path: &Path) -> Result<Self, Error> {
+        let conn = Connection::open(path).map_err(engine_err)?;
+        let journal = Self { conn };
+        journal.ensure_schema()?;
+        Ok(journal)
+    }
+
+    fn ensure_schema(&self) -> Result<(), Error> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS journal (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at_ms INTEGER NOT NULL,
+                    actor_name TEXT NOT NULL,
+                    actor_kind TEXT NOT NULL,
+                    act TEXT NOT NULL,
+                    session TEXT,
+                    instruction_summary TEXT,
+                    instruction_run_ref TEXT,
+                    instruction_verbatim TEXT,
+                    reference TEXT
+                );",
+            )
+            .map_err(engine_err)?;
+        self.conn
+            .pragma_update(None, "user_version", 1)
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
+    /// Append one entry to the journal.
+    pub fn append(&self, entry: &JournalEntry) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT INTO journal (
+                    at_ms, actor_name, actor_kind, act, session,
+                    instruction_summary, instruction_run_ref, instruction_verbatim, reference
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    entry.at_ms,
+                    entry.actor_name,
+                    entry.actor_kind,
+                    entry.act,
+                    entry.session,
+                    entry.instruction_summary,
+                    entry.instruction_run_ref,
+                    entry.instruction_verbatim,
+                    entry.reference,
+                ],
+            )
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
+    /// Read up to `limit` entries, newest first.
+    pub fn entries(&self, limit: usize) -> Result<Vec<JournalEntry>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT at_ms, actor_name, actor_kind, act, session,
+                        instruction_summary, instruction_run_ref, instruction_verbatim, reference
+                 FROM journal ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(engine_err)?;
+        let limit = i64::try_from(limit).map_err(engine_err)?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(JournalEntry {
+                    at_ms: row.get(0)?,
+                    actor_name: row.get(1)?,
+                    actor_kind: row.get(2)?,
+                    act: row.get(3)?,
+                    session: row.get(4)?,
+                    instruction_summary: row.get(5)?,
+                    instruction_run_ref: row.get(6)?,
+                    instruction_verbatim: row.get(7)?,
+                    reference: row.get(8)?,
+                })
+            })
+            .map_err(engine_err)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(engine_err)?);
+        }
+        Ok(entries)
+    }
+}
