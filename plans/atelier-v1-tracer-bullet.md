@@ -31,7 +31,9 @@ Recorded as ADRs in `docs/adr/`; vocabulary in `CONTEXT.md`. Durable across all 
 - Journal is append-only and distinct from history; instruction capture = summary + run reference by default, verbatim per profile (ADR-0004).
 - Editing never needs a lease; landing always does. Optimistic concurrency by default.
 - Crate layout (all `publish = false`): `core`, `diff-core`, `format-docx`, `surface`, `cli` (binary `ws`). anyhow + tracing. No mod.rs.
-- Agent surface verbs: `open_session`, `write`, `diff`, `land`, `journal` (MCP).
+- Delivery surfaces: one core, three faces — the SDK (core library) is the product; `ws` CLI, MCP (stdio in v1, streamable HTTP post-v1), and REST are thin shells over one API; no shell-only behavior (ADR-0006).
+- Storage: content = git object store via jj (ADR-0002); journal = SQLite beside the repo, never inside it (ADR-0005); projections = content-addressed derived cache, evictable.
+- Agent surface verbs: `open_session`, `write`, `diff`, `land`, `journal` (MCP; HTTP transports are the M5 backlog slice, gated on M2).
 
 ## Out of scope
 
@@ -187,3 +189,5 @@ M0 ─┬─▶ M1 ─┐
     ├─▶ M3 ─┘
     └─▶ M4 (CI early, polish last)
 ```
+
+Post-v1 backlog: **M5 HTTP surface** (MCP streamable HTTP + REST — same verbs, second transport), gated on M2, per ADR-0006.
