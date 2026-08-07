@@ -18,6 +18,10 @@ _Avoid_: origin, upstream, mount
 The rule for how content moves between a workspace and its source: import once, pull-only mirror, or two-way.
 _Avoid_: sync mode, replication
 
+**Boundary**:
+The set of paths a workspace versions. An ignored path is outside the workspace, not unversioned state inside it; changing the boundary is a journaled act.
+_Avoid_: ignore list, exclusions
+
 **Snapshot**:
 One immutable whole-workspace state in history, attributed to an actor.
 _Avoid_: version, revision, save
@@ -78,6 +82,10 @@ _Avoid_: merge conflict (implies blocking)
 The act of advancing a workspace's shared line to include a change, passing its gates.
 _Avoid_: merge, push, ship
 
+**Landing Request**:
+A change's application to land on the shared line: the diff, its requester, and its approvals, open until it lands, parks, or is abandoned.
+_Avoid_: pull request, merge request, MR
+
 **Lease**:
 A time-boxed exclusive claim on a scarce point of a workspace — a landing point, a shared working copy, or a policy-guarded path — held by one actor at a time. Editing needs no lease; landing does.
 _Avoid_: lock
@@ -99,6 +107,10 @@ _Avoid_: settings, config
 **Gate**:
 A policy point where an act needs an approval from an authorized actor before it lands.
 _Avoid_: check, review step
+
+**Approval**:
+A recorded grant by an authorized actor — human or agent — that helps a landing request pass its gate.
+_Avoid_: review (broader), sign-off
 
 ### Agent contract
 
