@@ -1,7 +1,7 @@
 # Plan: atelier v1 — tracer bullet
 
 > **Source PRD**: `plans/prd-atelier.md`
-> **Tracker**: atelier
+> **Tracker**: the project tracker 
 > **Status**: Approved
 > **Owner**: Luiz Parreira
 
