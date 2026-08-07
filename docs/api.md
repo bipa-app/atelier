@@ -76,7 +76,7 @@ The landing lease, request state, and journal writes go through one coordination
 
 ### Errors (typed; the contract includes failure)
 
-`NotAWorkspace` · `AlreadyAttached` · `NestedWorkspace` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }`
+`NotAWorkspace` · `AlreadyAttached` · `NestedWorkspace` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }` · `AddressNotFound { available }`
 
 ## 2. MCP (agent face)
 
@@ -86,7 +86,7 @@ Tools, thin over the SDK; explicit ids in every call (reconnect-safe):
 |---|---|---|
 | `manifest` | — | self-description (read this first) |
 | `open_session` | actor, instruction{summary, run_ref, verbatim?} | session_id, working_copy_path, change_id |
-| `read` | address, window?, view? | windowed content + continuation (§2.1) |
+| `read` | address, window?, view?, extract? | windowed content + continuation, or extracted field (§2.1) |
 | `write` | session_id, path, content | snapshot_id |
 | `diff` | session_id (or from/to), path? | Diff, rendered per fidelity; large diffs windowed (§2.1) |
 | `request_land` | session_id | request_id, gate state |
@@ -98,14 +98,16 @@ Tools, thin over the SDK; explicit ids in every call (reconnect-safe):
 
 stdio in M2; MCP streamable HTTP in M5 — same tools, reach not capability.
 
-### 2.1 Read protocol (artifact-style)
+### 2.1 Read protocol (after oh-my-pi's blob/artifact architecture)
 
-Modeled on an internal artifact substrate: bounded inline output, stable addresses, windowed recovery.
+oh-my-pi splits two stores on purpose — content-addressed blobs (dedup, global, immortal) vs session-scoped outputs (short local ids, append-only, retrieval-friendly) — and atelier inherits the same split natively: the engine's object store IS the blob store.
 
-- **Every read is windowed.** Default window ~50KB / N lines; response carries `{content, window: {start, end, total}, next?}`. `next` is the continuation cursor. No unbounded responses exist on the surface.
-- **Addresses are stable.** `path` (live working copy, via session_id) · `path@<snapshot>` (immutable) · `blob:<hash>` (immutable, content-addressed). Immutable addresses are agent-cacheable forever.
-- **Projection is the default view for non-text.** `read report.docx` returns its markdown projection (the text face agents want); `view=raw` returns bytes (base64, windowed). The projection's own address is stable: `(blob, package, version)`.
-- **Oversized tool results spill, never truncate silently.** A huge diff returns head + tail + `[... elided ...]` + a stable address to window through — byte-identical recovery, like `artifact://`.
+- **Content addresses** — `blob:sha256:<hash>` (the object store: deduplicating, idempotent, outlives every session) · `path@<snapshot>` (immutable) · `path` (live working copy, via session_id). Immutable addresses are agent-cacheable forever.
+- **Session outputs** — an oversized tool result (a big Diff, a long journal answer) spills to a session-scoped output with a short id: inline shows head + tail + `[... elided ...]` + the output's address; window through it with `read`. Ids allocate scan-before-use, so a resumed session never clobbers earlier outputs.
+- **Every read is windowed.** Default ~50KB; response carries `{content, window: {start, end, total}, next?}`. No unbounded responses exist on the surface.
+- **Projection is the default view for non-text.** `read report.docx` returns its markdown projection; `view=raw` returns bytes (base64, windowed). A projection's address is stable: (blob, package, version).
+- **Structured extraction.** Reads of structured payloads (manifest, journal answers, request lists) accept `extract` — a JSON path/query, omp's `agent://…?q=` idea — so an agent fetches one field, not a document. Extraction and windowing are mutually exclusive, as in omp.
+- **Errors teach the next move.** `AddressNotFound` lists the available outputs and nearest addresses, the way omp's resolvers list available artifact ids on a miss.
 
 ## 3. HTTP REST (M5, programmatic face)
 
