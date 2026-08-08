@@ -15,14 +15,17 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+# jj-lib's default `git` feature is required: workspaces are colocated git repos.
 jj-lib = "=0.44.0"
 pollster = "0.4"
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 gix-hash = "0.25"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", default-features = false, features = ["formatting"] }
+assert_cmd = "2"
+predicates = { version = "3", default-features = false, features = ["diff", "regex"] }
