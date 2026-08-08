@@ -30,7 +30,9 @@ pub enum Error {
     #[error("engine error: {0}")]
     Engine(String),
 
-    #[error("i/o error: {0}")]
+    // The io source is deliberately absent from the message: callers render
+    // the error chain, where the source already appears once.
+    #[error("i/o error")]
     Io(#[from] std::io::Error),
 
     #[error("config error: {0}")]
