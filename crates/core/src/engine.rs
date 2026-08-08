@@ -251,12 +251,25 @@ impl Engine {
 }
 
 fn build_settings(actor: &Actor) -> Result<UserSettings, Error> {
+    #[derive(serde::Serialize)]
+    struct UserConfig<'a> {
+        user: UserSection<'a>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct UserSection<'a> {
+        name: &'a str,
+        email: String,
+    }
+
     let mut config = StackedConfig::with_defaults();
-    let text = format!(
-        "[user]\nname = \"{name}\"\nemail = \"{email}@atelier.local\"\n",
-        name = actor.name,
-        email = actor.name,
-    );
+    let text = toml::to_string(&UserConfig {
+        user: UserSection {
+            name: &actor.name,
+            email: format!("{}@atelier.local", actor.name),
+        },
+    })
+    .map_err(config_err)?;
     let layer = ConfigLayer::parse(ConfigSource::User, &text).map_err(config_err)?;
     config.add_layer(layer);
     UserSettings::from_config(config).map_err(config_err)
