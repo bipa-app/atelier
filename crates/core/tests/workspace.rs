@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use atelier_core::{DeltaKind, Error, Fidelity, Workspace};
+use atelier_core::{Act, ActorKind, DeltaKind, Error, Fidelity, Workspace};
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -48,9 +48,9 @@ fn init_creates_control_dir_journal_and_git() {
 
     let entries = ws.journal(10).unwrap();
     assert!(entries.iter().any(|entry| {
-        entry.act == "workspace_init"
+        entry.act == Act::WorkspaceInit
             && entry.actor_name == "test-actor"
-            && entry.actor_kind == "human"
+            && entry.actor_kind == ActorKind::Human
     }));
 }
 
@@ -73,7 +73,7 @@ fn attach_imports_files_and_records_snapshot() {
     assert!(root.path().join("sub/nested.txt").is_file());
 
     let entries = ws.journal(20).unwrap();
-    assert!(entries.iter().any(|entry| entry.act == "source_attach"));
+    assert!(entries.iter().any(|entry| entry.act == Act::SourceAttach));
 
     let log = ws.log(20).unwrap();
     assert!(!log.is_empty());
@@ -96,7 +96,7 @@ fn edit_produces_snapshot_and_binary_changed_delta() {
     fs::write(root.path().join("hello.txt"), "changed").unwrap();
 
     let entries = ws.journal(50).unwrap();
-    assert!(entries.iter().any(|entry| entry.act == "snapshot"));
+    assert!(entries.iter().any(|entry| entry.act == Act::Snapshot));
 
     let diff = ws.diff_latest().unwrap();
     assert_eq!(diff.fidelity, Fidelity::Binary);

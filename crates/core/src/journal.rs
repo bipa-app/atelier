@@ -1,16 +1,83 @@
+use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, params};
 
+use crate::config::ActorKind;
 use crate::error::{Error, engine_err};
+
+/// One thing an actor can do to a workspace that the journal records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    WorkspaceInit,
+    SourceAttach,
+    Snapshot,
+}
+
+impl Act {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceInit => "workspace_init",
+            Self::SourceAttach => "source_attach",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+
+impl fmt::Display for Act {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Act {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "workspace_init" => Ok(Self::WorkspaceInit),
+            "source_attach" => Ok(Self::SourceAttach),
+            "snapshot" => Ok(Self::Snapshot),
+            other => Err(Error::Engine(format!("unknown journal act: {other}"))),
+        }
+    }
+}
+
+impl ToSql for Act {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for Act {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_str(text).map_err(|error| FromSqlError::Other(error.to_string().into()))
+    }
+}
+
+impl ToSql for ActorKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for ActorKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_str(text).map_err(|error| FromSqlError::Other(error.to_string().into()))
+    }
+}
 
 /// One record in a workspace's journal: who did what, and any intent behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
     pub at_ms: i64,
     pub actor_name: String,
-    pub actor_kind: String,
-    pub act: String,
+    pub actor_kind: ActorKind,
+    pub act: Act,
     pub session: Option<String>,
     pub instruction_summary: Option<String>,
     pub instruction_run_ref: Option<String>,

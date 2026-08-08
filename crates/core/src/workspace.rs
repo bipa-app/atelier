@@ -5,27 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use atelier_diff_core::Diff;
 
 use crate::config::{
-    Actor, SourceEntry, WorkspaceConfig, read_workspace_config, resolve_actor,
+    Actor, Source, SourceKind, SyncPolicy, WorkspaceConfig, read_workspace_config, resolve_actor,
     write_workspace_config,
 };
 use crate::engine::Engine;
 use crate::error::{Error, config_err};
-use crate::journal::{Journal, JournalEntry};
+use crate::journal::{Act, Journal, JournalEntry};
 
 pub use crate::engine::Snapshot;
 
 const CONTROL_DIR: &str = ".atelier";
 const JOURNAL_FILE: &str = "journal.sqlite3";
 const SKIP_NAMES: [&str; 3] = [".atelier", ".jj", ".git"];
-
-/// An external origin the workspace is attached to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Source {
-    pub kind: String,
-    pub path: PathBuf,
-    pub sync: String,
-    pub mount: String,
-}
 
 /// A named, versioned body of work content with its own history and journal.
 pub struct Workspace {
@@ -62,7 +53,7 @@ impl Workspace {
             engine,
             journal,
         };
-        let entry = workspace.entry("workspace_init", None)?;
+        let entry = workspace.entry(Act::WorkspaceInit, None)?;
         workspace.journal.append(&entry)?;
         Ok(workspace)
     }
@@ -110,21 +101,16 @@ impl Workspace {
 
         copy_tree(folder, &self.root)?;
         let source = Source {
-            kind: "local-folder".to_string(),
+            kind: SourceKind::LocalFolder,
             path: folder.to_path_buf(),
-            sync: "two-way".to_string(),
-            mount: "/".to_string(),
+            sync: SyncPolicy::TwoWay,
+            mount: PathBuf::from("/"),
         };
-        config.sources.push(SourceEntry {
-            kind: source.kind.clone(),
-            path: folder.display().to_string(),
-            sync: source.sync.clone(),
-            mount: source.mount.clone(),
-        });
+        config.sources.push(source.clone());
         write_workspace_config(&control, &config)?;
 
         let snapshot = self.engine.snapshot()?;
-        let entry = self.entry("source_attach", snapshot)?;
+        let entry = self.entry(Act::SourceAttach, snapshot)?;
         self.journal.append(&entry)?;
         Ok(source)
     }
@@ -155,18 +141,18 @@ impl Workspace {
 
     fn auto_snapshot(&mut self) -> Result<(), Error> {
         if let Some(id) = self.engine.snapshot()? {
-            let entry = self.entry("snapshot", Some(id))?;
+            let entry = self.entry(Act::Snapshot, Some(id))?;
             self.journal.append(&entry)?;
         }
         Ok(())
     }
 
-    fn entry(&self, act: &str, reference: Option<String>) -> Result<JournalEntry, Error> {
+    fn entry(&self, act: Act, reference: Option<String>) -> Result<JournalEntry, Error> {
         Ok(JournalEntry {
             at_ms: now_ms()?,
             actor_name: self.actor.name.clone(),
-            actor_kind: self.actor.kind.clone(),
-            act: act.to_string(),
+            actor_kind: self.actor.kind,
+            act,
             session: None,
             instruction_summary: None,
             instruction_run_ref: None,

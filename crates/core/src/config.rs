@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +11,45 @@ use crate::error::{Error, config_err};
 #[derive(Debug, Clone)]
 pub struct Actor {
     pub name: String,
-    pub kind: String,
+    pub kind: ActorKind,
+}
+
+/// What kind of actor acted: a person, an AI agent, or an automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActorKind {
+    Human,
+    Agent,
+    Automation,
+}
+
+impl ActorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+            Self::Automation => "automation",
+        }
+    }
+}
+
+impl fmt::Display for ActorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ActorKind {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "human" => Ok(Self::Human),
+            "agent" => Ok(Self::Agent),
+            "automation" => Ok(Self::Automation),
+            other => Err(Error::Config(format!("unknown actor kind: {other}"))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,7 +60,7 @@ struct ActorFile {
 #[derive(Debug, Deserialize)]
 struct ActorSection {
     name: String,
-    kind: String,
+    kind: ActorKind,
 }
 
 /// Resolve the actor from the first config home that applies.
@@ -67,26 +106,58 @@ fn actor_config_path() -> Option<PathBuf> {
     None
 }
 
+/// An external origin the workspace is attached to, as held in memory and as
+/// persisted under `[[source]]` in `.atelier/config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Source {
+    pub kind: SourceKind,
+    pub path: PathBuf,
+    pub sync: SyncPolicy,
+    pub mount: PathBuf,
+}
+
+/// The kind of origin a source is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    LocalFolder,
+}
+
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalFolder => f.write_str("local-folder"),
+        }
+    }
+}
+
+/// How content moves between a workspace and its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncPolicy {
+    TwoWay,
+}
+
+impl fmt::Display for SyncPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TwoWay => f.write_str("two-way"),
+        }
+    }
+}
+
 /// The on-disk `.atelier/config.toml` describing one workspace.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub schema: u32,
     pub workspace: WorkspaceSection,
     #[serde(default, rename = "source")]
-    pub sources: Vec<SourceEntry>,
+    pub sources: Vec<Source>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceSection {
     pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceEntry {
-    pub kind: String,
-    pub path: String,
-    pub sync: String,
-    pub mount: String,
 }
 
 impl WorkspaceConfig {
