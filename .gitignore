@@ -1,1 +1,4 @@
 /target
+
+# Local-only real-document fixtures: confidential, never committed.
+/fixtures/real/
