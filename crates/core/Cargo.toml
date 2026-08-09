@@ -7,14 +7,17 @@ publish = false
 
 [dependencies]
 atelier-diff-core = { path = "../diff-core" }
+atelier-format-docx = { path = "../format-docx" }
 futures.workspace = true
 gix-hash.workspace = true
 jj-lib.workspace = true
 pollster.workspace = true
 rusqlite.workspace = true
+sha2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zip.workspace = true

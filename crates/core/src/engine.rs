@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use atelier_diff_core::{Diff, diff_listings};
-use futures::StreamExt;
-use jj_lib::backend::CommitId;
+use futures::{AsyncReadExt, StreamExt};
+use jj_lib::backend::{CommitId, TreeValue};
 use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::default_backend_factories::{
     default_backend_factories, default_working_copy_factories,
@@ -25,6 +25,11 @@ use crate::error::{Error, config_err, engine_err};
 
 const MAX_NEW_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
+/// The largest file the ladder loads to raise its fidelity. Bigger files
+/// stay at the binary rung — their deltas are still listed, just not
+/// projected or line-diffed — and the caller journals the degradation.
+pub(crate) const MAX_LADDER_FILE_SIZE: u64 = 8 * 1024 * 1024;
+
 /// One immutable whole-workspace state in history, attributed to an actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -32,6 +37,29 @@ pub struct Snapshot {
     pub actor: String,
     pub at_ms: i64,
     pub parents: Vec<String>,
+}
+
+/// The two trees a diff spans, kept opaque so jj types stay inside the
+/// engine. The ladder hands it back to read file content off either side.
+pub(crate) struct DiffSides {
+    before: MergedTree,
+    after: MergedTree,
+}
+
+/// A file's content on one side of a diff: its content id and its bytes.
+pub(crate) struct FileBlob {
+    pub id: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What one side of a diff holds at a path.
+pub(crate) enum Side {
+    /// The path is absent or not a plain file on this side.
+    Absent,
+    /// The file exceeds [`MAX_LADDER_FILE_SIZE`]; its delta stays at the
+    /// binary rung and the caller journals the degradation.
+    TooLarge,
+    Blob(FileBlob),
 }
 
 /// The jj-backed engine: the only place jj types are allowed to appear.
@@ -188,12 +216,13 @@ impl Engine {
         Ok(out)
     }
 
-    /// Diff the latest snapshot against its first parent (empty tree if none).
-    pub fn diff_latest(&self) -> Result<Diff, Error> {
+    /// Diff the latest snapshot against its first parent (empty tree if
+    /// none), returning the binary-rung diff plus the sides it spans.
+    pub fn diff_latest(&self) -> Result<(Diff, DiffSides), Error> {
         block_on(self.diff_latest_async())
     }
 
-    async fn diff_latest_async(&self) -> Result<Diff, Error> {
+    async fn diff_latest_async(&self) -> Result<(Diff, DiffSides), Error> {
         let name = self.ws.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
@@ -216,18 +245,88 @@ impl Engine {
                 .tree(),
             None => self.empty_tree()?,
         };
-        tree_diff(&old_tree, &new_tree).await
+        self.tree_diff(old_tree, new_tree).await
     }
 
-    /// Diff two snapshots by id: `before` against `after`.
-    pub fn diff_between(&self, before: &str, after: &str) -> Result<Diff, Error> {
+    /// Diff two snapshots by id: `before` against `after`, returning the
+    /// binary-rung diff plus the sides it spans.
+    pub fn diff_between(&self, before: &str, after: &str) -> Result<(Diff, DiffSides), Error> {
         block_on(self.diff_between_async(before, after))
     }
 
-    async fn diff_between_async(&self, before: &str, after: &str) -> Result<Diff, Error> {
+    async fn diff_between_async(
+        &self,
+        before: &str,
+        after: &str,
+    ) -> Result<(Diff, DiffSides), Error> {
         let old_tree = self.tree_at(before)?;
         let new_tree = self.tree_at(after)?;
-        tree_diff(&old_tree, &new_tree).await
+        self.tree_diff(old_tree, new_tree).await
+    }
+
+    /// The file at `path` on each side of the diff.
+    pub fn read_file_sides(&self, sides: &DiffSides, path: &str) -> Result<(Side, Side), Error> {
+        block_on(async {
+            let path = RepoPath::from_internal_string(path).map_err(engine_err)?;
+            let before = self.file_blob(&sides.before, path).await?;
+            let after = self.file_blob(&sides.after, path).await?;
+            Ok((before, after))
+        })
+    }
+
+    async fn file_blob(&self, tree: &MergedTree, path: &RepoPath) -> Result<Side, Error> {
+        let value = tree.path_value(path).await.map_err(engine_err)?;
+        let Some(Some(TreeValue::File { id, .. })) = value.as_resolved() else {
+            return Ok(Side::Absent);
+        };
+        let reader = self
+            .repo
+            .store()
+            .read_file(path, id)
+            .await
+            .map_err(engine_err)?;
+        let mut bytes = Vec::new();
+        reader
+            .take(MAX_LADDER_FILE_SIZE + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(engine_err)?;
+        if bytes.len() as u64 > MAX_LADDER_FILE_SIZE {
+            return Ok(Side::TooLarge);
+        }
+        Ok(Side::Blob(FileBlob {
+            id: id.hex(),
+            bytes,
+        }))
+    }
+
+    async fn tree_diff(
+        &self,
+        old_tree: MergedTree,
+        new_tree: MergedTree,
+    ) -> Result<(Diff, DiffSides), Error> {
+        let mut before = BTreeMap::new();
+        let mut after = BTreeMap::new();
+        let mut stream = old_tree.diff_stream(&new_tree, &EverythingMatcher);
+        while let Some(entry) = stream.next().await {
+            let path = entry.path.as_internal_file_string().to_string();
+            let values = entry.values.map_err(engine_err)?;
+            if values.before.is_present() {
+                before.insert(path.clone(), format!("{:?}", values.before));
+            }
+            if values.after.is_present() {
+                after.insert(path, format!("{:?}", values.after));
+            }
+        }
+        drop(stream);
+        let diff = diff_listings(&before, &after);
+        Ok((
+            diff,
+            DiffSides {
+                before: old_tree,
+                after: new_tree,
+            },
+        ))
     }
 
     fn tree_at(&self, id: &str) -> Result<MergedTree, Error> {
@@ -283,21 +382,4 @@ fn base_ignores() -> Result<Arc<GitIgnoreFile>, Error> {
             b".atelier/\n.git/\n.jj/\n",
         )
         .map_err(engine_err)
-}
-
-async fn tree_diff(old_tree: &MergedTree, new_tree: &MergedTree) -> Result<Diff, Error> {
-    let mut before = BTreeMap::new();
-    let mut after = BTreeMap::new();
-    let mut stream = old_tree.diff_stream(new_tree, &EverythingMatcher);
-    while let Some(entry) = stream.next().await {
-        let path = entry.path.as_internal_file_string().to_string();
-        let values = entry.values.map_err(engine_err)?;
-        if values.before.is_present() {
-            before.insert(path.clone(), format!("{:?}", values.before));
-        }
-        if values.after.is_present() {
-            after.insert(path, format!("{:?}", values.after));
-        }
-    }
-    Ok(diff_listings(&before, &after))
 }

@@ -4,9 +4,12 @@ mod config;
 mod engine;
 mod error;
 mod journal;
+mod projection;
 mod workspace;
 
-pub use atelier_diff_core::{Address, Delta, DeltaKind, Diff, Fidelity};
+pub use atelier_diff_core::{
+    Address, Confidence, Delta, DeltaKind, Diff, Fidelity, Line, LineKind, PackageId,
+};
 pub use config::{Actor, ActorKind, Source, SourceKind, SyncPolicy};
 pub use error::Error;
 pub use journal::{Act, JournalEntry};

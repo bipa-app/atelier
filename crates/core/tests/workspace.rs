@@ -1,8 +1,9 @@
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use atelier_core::{Act, ActorKind, DeltaKind, Error, Fidelity, Workspace};
+use atelier_core::{Act, ActorKind, DeltaKind, Error, Fidelity, LineKind, Workspace};
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -81,7 +82,7 @@ fn attach_imports_files_and_records_snapshot() {
 }
 
 #[test]
-fn edit_produces_snapshot_and_binary_changed_delta() {
+fn edit_of_text_file_raises_changed_delta_to_text_rung() {
     let _guard = env_lock();
     let config = tempfile::tempdir().unwrap();
     set_actor(config.path());
@@ -99,10 +100,282 @@ fn edit_produces_snapshot_and_binary_changed_delta() {
     assert!(entries.iter().any(|entry| entry.act == Act::Snapshot));
 
     let diff = ws.diff_latest().unwrap();
-    assert_eq!(diff.fidelity, Fidelity::Binary);
     assert_eq!(diff.deltas.len(), 1);
     assert_eq!(diff.deltas[0].address.as_str(), "hello.txt");
     assert_eq!(diff.deltas[0].kind, DeltaKind::Changed);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
+    assert!(
+        diff.deltas[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == LineKind::Removed && line.text == "hi")
+    );
+    assert!(
+        diff.deltas[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == LineKind::Added && line.text == "changed")
+    );
+}
+
+#[test]
+fn edit_of_markdown_file_raises_changed_delta_to_text_rung() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("notes.md"), "# Title\n\nfirst draft\n").unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("notes.md"), "# Title\n\nsecond draft\n").unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].address.as_str(), "notes.md");
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
+    assert_eq!(diff.deltas[0].package, None);
+    assert!(
+        diff.deltas[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == LineKind::Added && line.text == "second draft")
+    );
+}
+
+#[test]
+fn edit_of_unknown_format_file_stays_at_binary_rung() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("opaque.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("opaque.bin"), [0x00, 0xff, 0x02, 0x03]).unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].address.as_str(), "opaque.bin");
+    assert_eq!(diff.deltas[0].kind, DeltaKind::Changed);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Binary);
+    assert!(diff.deltas[0].lines.is_empty());
+}
+
+/// A one-paragraph Word document holding `sentence`, zipped as a .docx.
+fn docx(sentence: &str) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{sentence}</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("word/document.xml", options).unwrap();
+    writer.write_all(document.as_bytes()).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn changed_docx_raises_to_text_rung_carrying_its_package_and_reuses_the_cache() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("report.docx"), docx("first version")).unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("report.docx"), docx("second version")).unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
+    assert_eq!(
+        diff.deltas[0].package.map(|package| package.to_string()),
+        Some("format-docx@0.1.0".to_string())
+    );
+
+    // The second diff of the same snapshots serves both sides from the
+    // published cache entries and must carry the identical comparison.
+    let again = ws.diff_latest().unwrap();
+    assert_eq!(again, diff);
+}
+
+#[test]
+fn file_past_the_ladder_cap_stays_binary_and_journals_the_degradation() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    // 9 MiB of text: past the 8 MiB ladder cap, under the snapshot limit.
+    let big = "all work and no play makes agents dull\n".repeat(9 * 1024 * 1024 / 39);
+    fs::write(source.path().join("huge.txt"), &big).unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("huge.txt"), format!("{big}changed\n")).unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Binary);
+    assert!(diff.deltas[0].lines.is_empty());
+
+    let entries = ws.journal(50).unwrap();
+    let capped = entries
+        .iter()
+        .find(|entry| entry.act == Act::FileTooLarge)
+        .expect("the degradation must be journaled");
+    let reference = capped.reference.as_deref().expect("reference names it");
+    assert!(reference.contains("huge.txt"), "got: {reference}");
+    assert!(reference.contains("ladder cap"), "got: {reference}");
+}
+
+#[test]
+fn docx_without_zip_magic_is_claimed_and_its_failure_journaled() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    // Plain ASCII masquerading as a .docx: the package must claim it by
+    // extension and fail loudly, never let it diff as plain text.
+    fs::write(source.path().join("fake.docx"), "just some text").unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("fake.docx"), "just some text, changed").unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Binary);
+    assert!(diff.deltas[0].lines.is_empty());
+
+    let entries = ws.journal(50).unwrap();
+    assert!(
+        entries.iter().any(|entry| entry.act == Act::PackageFailed),
+        "the extension claim must journal the projection failure"
+    );
+}
+
+#[test]
+fn a_corrupted_cache_entry_heals_on_the_next_diff() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("report.docx"), docx("first version")).unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(root.path().join("report.docx"), docx("second version")).unwrap();
+    let before = ws.diff_latest().unwrap();
+
+    // Corrupt every published projection entry with invalid UTF-8; the
+    // next diff must treat them as misses and reproject identically.
+    let projections = root.path().join(".atelier/projections");
+    for package_dir in fs::read_dir(&projections).unwrap() {
+        for entry in fs::read_dir(package_dir.unwrap().path()).unwrap() {
+            fs::write(entry.unwrap().path(), [0xff, 0xfe, 0xff]).unwrap();
+        }
+    }
+
+    let after = ws.diff_latest().unwrap();
+    assert_eq!(after, before);
+
+    // Forged valid-UTF-8 entries fail the digest and heal the same way.
+    for package_dir in fs::read_dir(&projections).unwrap() {
+        for entry in fs::read_dir(package_dir.unwrap().path()).unwrap() {
+            fs::write(entry.unwrap().path(), "forged cache value\n").unwrap();
+        }
+    }
+
+    let healed = ws.diff_latest().unwrap();
+    assert_eq!(healed, before);
+}
+
+#[test]
+fn an_unwritable_projection_cache_does_not_gate_the_diff() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("report.docx"), docx("first version")).unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    // Block the projections directory with a plain file: publishing fails,
+    // but the projection is already computed — the diff must still raise.
+    fs::write(root.path().join(".atelier/projections"), "in the way").unwrap();
+    fs::write(root.path().join("report.docx"), docx("second version")).unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
+}
+
+#[test]
+fn failing_package_falls_back_to_binary_and_journals_the_failure() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    // Zip magic makes the docx package claim it; the broken archive then
+    // fails projection.
+    fs::write(
+        source.path().join("broken.docx"),
+        b"PK\x03\x04 not a real zip",
+    )
+    .unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(
+        root.path().join("broken.docx"),
+        b"PK\x03\x04 still not a real zip",
+    )
+    .unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Binary);
+    assert!(diff.deltas[0].lines.is_empty());
+
+    let entries = ws.journal(50).unwrap();
+    let failure = entries
+        .iter()
+        .find(|entry| entry.act == Act::PackageFailed)
+        .expect("the fallback must be journaled");
+    let reference = failure.reference.as_deref().expect("reference names it");
+    assert!(reference.contains("broken.docx"), "got: {reference}");
+    assert!(reference.contains("format-docx@0.1.0"), "got: {reference}");
+    assert!(
+        reference.contains("fell_back_to=binary"),
+        "got: {reference}"
+    );
 }
 
 #[test]

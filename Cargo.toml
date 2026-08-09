@@ -27,6 +27,7 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }
 similar = { version = "3", default-features = false, features = ["std", "text"] }
+sha2 = "0.10"
 quick-xml = "0.41"
 # deflate-flate2-zlib-rs reads and writes the one method Word uses (flate2 on
 # the zlib-rs backend); the blanket `deflate` feature would also pull in the
