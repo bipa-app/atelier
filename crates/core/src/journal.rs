@@ -14,14 +14,24 @@ pub enum Act {
     WorkspaceInit,
     SourceAttach,
     Snapshot,
+    /// A format package failed or panicked over a document; the diff fell
+    /// back to the binary rung. The entry's reference names the document,
+    /// the package, and the reason — degradation is never silent.
+    PackageFailed,
+    /// A file exceeded the ladder's size cap; its delta stayed at the
+    /// binary rung. The entry's reference names the file and the cap.
+    FileTooLarge,
 }
 
 impl Act {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WorkspaceInit => "workspace_init",
             Self::SourceAttach => "source_attach",
             Self::Snapshot => "snapshot",
+            Self::PackageFailed => "package_failed",
+            Self::FileTooLarge => "file_too_large",
         }
     }
 }
@@ -40,6 +50,8 @@ impl FromStr for Act {
             "workspace_init" => Ok(Self::WorkspaceInit),
             "source_attach" => Ok(Self::SourceAttach),
             "snapshot" => Ok(Self::Snapshot),
+            "package_failed" => Ok(Self::PackageFailed),
+            "file_too_large" => Ok(Self::FileTooLarge),
             other => Err(Error::Engine(format!("unknown journal act: {other}"))),
         }
     }
@@ -85,7 +97,7 @@ pub struct JournalEntry {
     pub reference: Option<String>,
 }
 
-/// The append-only journal, a SQLite database beside the repo.
+/// The append-only journal, a `SQLite` database beside the repo.
 pub struct Journal {
     conn: Connection,
 }

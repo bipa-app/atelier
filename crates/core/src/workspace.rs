@@ -1,16 +1,21 @@
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use atelier_diff_core::Diff;
+use atelier_diff_core::{
+    Delta, DeltaKind, Diff, FormatPackage, PackageId, as_text, detect_package, diff_lines,
+};
+use atelier_format_docx::DocxPackage;
 
 use crate::config::{
     Actor, Source, SourceKind, SyncPolicy, WorkspaceConfig, read_workspace_config, resolve_actor,
     write_workspace_config,
 };
-use crate::engine::Engine;
+use crate::engine::{DiffSides, Engine, FileBlob, MAX_LADDER_FILE_SIZE, Side};
 use crate::error::{Error, config_err};
 use crate::journal::{Act, Journal, JournalEntry};
+use crate::projection::ProjectionCache;
 
 pub use crate::engine::Snapshot;
 
@@ -24,6 +29,8 @@ pub struct Workspace {
     actor: Actor,
     engine: Engine,
     journal: Journal,
+    packages: Vec<Box<dyn FormatPackage>>,
+    projections: ProjectionCache,
 }
 
 impl Workspace {
@@ -52,6 +59,8 @@ impl Workspace {
             actor,
             engine,
             journal,
+            packages: builtin_packages(),
+            projections: ProjectionCache::new(&control),
         };
         let entry = workspace.entry(Act::WorkspaceInit, None)?;
         workspace.journal.append(&entry)?;
@@ -75,6 +84,8 @@ impl Workspace {
             actor,
             engine,
             journal,
+            packages: builtin_packages(),
+            projections: ProjectionCache::new(&control),
         })
     }
 
@@ -121,16 +132,20 @@ impl Workspace {
         self.engine.log(limit)
     }
 
-    /// Diff the latest snapshot against its first parent.
+    /// Diff the latest snapshot against its first parent, each delta raised
+    /// to the highest rung the ladder allows.
     pub fn diff_latest(&mut self) -> Result<Diff, Error> {
         self.auto_snapshot()?;
-        self.engine.diff_latest()
+        let (diff, sides) = self.engine.diff_latest()?;
+        self.raised(diff, &sides)
     }
 
-    /// Diff two snapshots by id: `before` against `after`.
+    /// Diff two snapshots by id: `before` against `after`, each delta
+    /// raised to the highest rung the ladder allows.
     pub fn diff_between(&mut self, before: &str, after: &str) -> Result<Diff, Error> {
         self.auto_snapshot()?;
-        self.engine.diff_between(before, after)
+        let (diff, sides) = self.engine.diff_between(before, after)?;
+        self.raised(diff, &sides)
     }
 
     /// Read up to `limit` journal entries, newest first.
@@ -145,6 +160,132 @@ impl Workspace {
             self.journal.append(&entry)?;
         }
         Ok(())
+    }
+
+    /// Raise every delta the ladder can: through a package projection when
+    /// one detects the document, as plain text when both sides are text,
+    /// else leave it at the binary rung it arrived at.
+    fn raised(&self, diff: Diff, sides: &DiffSides) -> Result<Diff, Error> {
+        let deltas = diff
+            .deltas
+            .into_iter()
+            .map(|delta| self.raise(delta, sides))
+            .collect::<Result<Vec<Delta>, Error>>()?;
+        Ok(Diff { deltas })
+    }
+
+    /// Only `Changed` deltas raise in v1: an added or removed document is
+    /// already told by its listing line, without dumping its whole content.
+    fn raise(&self, delta: Delta, sides: &DiffSides) -> Result<Delta, Error> {
+        if delta.kind != DeltaKind::Changed {
+            return Ok(delta);
+        }
+        let (before, after) = match self.engine.read_file_sides(sides, delta.address.as_str())? {
+            (Side::Blob(before), Side::Blob(after)) => (before, after),
+            (Side::TooLarge, _) | (_, Side::TooLarge) => {
+                self.file_too_large(delta.address.as_str())?;
+                return Ok(delta);
+            }
+            (Side::Absent, _) | (_, Side::Absent) => return Ok(delta),
+        };
+        if let Some(package) = self.detected(delta.address.as_str(), &after)? {
+            let projections = (
+                self.projection(package, delta.address.as_str(), &before)?,
+                self.projection(package, delta.address.as_str(), &after)?,
+            );
+            if let (Some(before), Some(after)) = projections {
+                return Ok(delta.at_text_rung(diff_lines(&before, &after), Some(package.id())));
+            }
+            return Ok(delta);
+        }
+        // "Fidelity drops to text or binary" (CONTEXT.md, Format Package):
+        // a package-less document that decodes as text diffs as text —
+        // content-based detection, the git model — because extension
+        // allowlists would drop the source and config files agents edit
+        // all day to the binary rung. Opaque bytes stay binary.
+        match (as_text(&before.bytes), as_text(&after.bytes)) {
+            (Some(before), Some(after)) => Ok(delta.at_text_rung(diff_lines(before, after), None)),
+            _ => Ok(delta),
+        }
+    }
+
+    /// The package claiming the document, behind a panic boundary: a
+    /// panicking package degrades fidelity, it never kills the process
+    /// (its journal entry keeps the degradation loud).
+    fn detected(
+        &self,
+        address: &str,
+        blob: &FileBlob,
+    ) -> Result<Option<&dyn FormatPackage>, Error> {
+        if let Ok(package) = catch_unwind(AssertUnwindSafe(|| {
+            detect_package(&self.packages, address, &blob.bytes)
+        })) {
+            Ok(package)
+        } else {
+            self.package_failed(address, None, "a package panicked during detection")?;
+            Ok(None)
+        }
+    }
+
+    /// One side's projection: the cache entry when published, computed and
+    /// published otherwise. `None` when the package failed or panicked —
+    /// journaled as `package_failed`, so the delta's fall to the binary
+    /// rung is never silent.
+    fn projection(
+        &self,
+        package: &dyn FormatPackage,
+        address: &str,
+        blob: &FileBlob,
+    ) -> Result<Option<String>, Error> {
+        if let Some(text) = self.projections.read(package.id(), blob) {
+            return Ok(Some(text));
+        }
+        match catch_unwind(AssertUnwindSafe(|| package.project(&blob.bytes))) {
+            Ok(Ok(projection)) => {
+                // The cache is derived and evictable: the projection is
+                // already computed and correct, so a failed publish must
+                // not gate the diff — it only costs a recomputation on
+                // some later diff.
+                let _ = self.projections.store(package.id(), blob, &projection.text);
+                Ok(Some(projection.text))
+            }
+            Ok(Err(error)) => {
+                self.package_failed(address, Some(package.id()), &error.to_string())?;
+                Ok(None)
+            }
+            Err(_) => {
+                self.package_failed(
+                    address,
+                    Some(package.id()),
+                    "the package panicked during projection",
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn package_failed(
+        &self,
+        address: &str,
+        package: Option<PackageId>,
+        reason: &str,
+    ) -> Result<(), Error> {
+        let reference = match package {
+            Some(id) => format!("{address} {id} fell_back_to=binary: {reason}"),
+            None => format!("{address} fell_back_to=binary: {reason}"),
+        };
+        let entry = self.entry(Act::PackageFailed, Some(reference))?;
+        self.journal.append(&entry)
+    }
+
+    /// A file past the ladder cap keeps its binary-rung listing line; the
+    /// journal records the degradation so it is never silent.
+    fn file_too_large(&self, address: &str) -> Result<(), Error> {
+        let reference = format!(
+            "{address} exceeds the {MAX_LADDER_FILE_SIZE}-byte ladder cap; kept at the binary rung"
+        );
+        let entry = self.entry(Act::FileTooLarge, Some(reference))?;
+        self.journal.append(&entry)
     }
 
     fn entry(&self, act: Act, reference: Option<String>) -> Result<JournalEntry, Error> {
@@ -162,10 +303,15 @@ impl Workspace {
     }
 }
 
+/// Every format package built into this core, in detection order.
+fn builtin_packages() -> Vec<Box<dyn FormatPackage>> {
+    vec![Box::new(DocxPackage)]
+}
+
 fn workspace_name(root: &Path) -> String {
     match root.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name.to_string(),
-        None => "workspace".to_string(),
+        Some(name) => name.to_owned(),
+        None => "workspace".to_owned(),
     }
 }
 

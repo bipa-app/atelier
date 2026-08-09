@@ -10,33 +10,18 @@ use crate::model::{Address, Delta, DeltaKind, Diff, Fidelity};
 /// delta. Deltas come back sorted by path, so the same inputs always produce
 /// the same diff. `Moved` is never produced here — it needs the engine's
 /// rename detection, not a content-id comparison.
+#[must_use]
 pub fn diff_listings(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Diff {
     let paths: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
 
     let mut deltas = Vec::new();
     for path in paths {
         let delta = match (before.get(path), after.get(path)) {
-            (Some(old), None) => Some(Delta {
-                address: Address::new(path.clone()),
-                kind: DeltaKind::Removed,
-                before: Some(old.clone()),
-                after: None,
-                summary: None,
-            }),
-            (None, Some(new)) => Some(Delta {
-                address: Address::new(path.clone()),
-                kind: DeltaKind::Added,
-                before: None,
-                after: Some(new.clone()),
-                summary: None,
-            }),
-            (Some(old), Some(new)) if old != new => Some(Delta {
-                address: Address::new(path.clone()),
-                kind: DeltaKind::Changed,
-                before: Some(old.clone()),
-                after: Some(new.clone()),
-                summary: None,
-            }),
+            (Some(old), None) => Some(binary_delta(path, DeltaKind::Removed, Some(old), None)),
+            (None, Some(new)) => Some(binary_delta(path, DeltaKind::Added, None, Some(new))),
+            (Some(old), Some(new)) if old != new => {
+                Some(binary_delta(path, DeltaKind::Changed, Some(old), Some(new)))
+            }
             _ => None,
         };
         if let Some(delta) = delta {
@@ -44,9 +29,23 @@ pub fn diff_listings(before: &BTreeMap<String, String>, after: &BTreeMap<String,
         }
     }
 
-    Diff {
+    Diff { deltas }
+}
+
+fn binary_delta(
+    path: &str,
+    kind: DeltaKind,
+    before: Option<&String>,
+    after: Option<&String>,
+) -> Delta {
+    Delta {
+        address: Address::new(path),
+        kind,
         fidelity: Fidelity::Binary,
-        deltas,
+        before: before.cloned(),
+        after: after.cloned(),
+        lines: Vec::new(),
+        package: None,
     }
 }
 
@@ -57,7 +56,7 @@ mod tests {
     fn listing(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         entries
             .iter()
-            .map(|(path, id)| ((*path).to_string(), (*id).to_string()))
+            .map(|(path, id)| ((*path).to_owned(), (*id).to_owned()))
             .collect()
     }
 
@@ -68,13 +67,14 @@ mod tests {
 
         let diff = diff_listings(&before, &after);
 
-        assert_eq!(diff.fidelity, Fidelity::Binary);
         assert_eq!(diff.deltas.len(), 1);
         let delta = &diff.deltas[0];
         assert_eq!(delta.address, Address::new("a.txt"));
         assert_eq!(delta.kind, DeltaKind::Added);
+        assert_eq!(delta.fidelity, Fidelity::Binary);
         assert_eq!(delta.before, None);
-        assert_eq!(delta.after, Some("id1".to_string()));
+        assert_eq!(delta.after, Some("id1".to_owned()));
+        assert!(delta.lines.is_empty());
     }
 
     #[test]
@@ -87,7 +87,8 @@ mod tests {
         assert_eq!(diff.deltas.len(), 1);
         let delta = &diff.deltas[0];
         assert_eq!(delta.kind, DeltaKind::Removed);
-        assert_eq!(delta.before, Some("id1".to_string()));
+        assert_eq!(delta.fidelity, Fidelity::Binary);
+        assert_eq!(delta.before, Some("id1".to_owned()));
         assert_eq!(delta.after, None);
     }
 
@@ -101,8 +102,9 @@ mod tests {
         assert_eq!(diff.deltas.len(), 1);
         let delta = &diff.deltas[0];
         assert_eq!(delta.kind, DeltaKind::Changed);
-        assert_eq!(delta.before, Some("id1".to_string()));
-        assert_eq!(delta.after, Some("id2".to_string()));
+        assert_eq!(delta.fidelity, Fidelity::Binary);
+        assert_eq!(delta.before, Some("id1".to_owned()));
+        assert_eq!(delta.after, Some("id2".to_owned()));
     }
 
     #[test]
@@ -141,7 +143,6 @@ mod tests {
     fn both_empty_yields_no_deltas() {
         let diff = diff_listings(&listing(&[]), &listing(&[]));
 
-        assert_eq!(diff.fidelity, Fidelity::Binary);
         assert!(diff.deltas.is_empty());
     }
 }

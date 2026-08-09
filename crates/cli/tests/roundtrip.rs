@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -6,7 +7,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn command(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").unwrap();
+    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -14,29 +15,31 @@ fn command(config_home: &Path, current_dir: &Path) -> Command {
 }
 
 fn write_actor_config(config_home: &Path) {
-    fs::create_dir_all(config_home).unwrap();
+    fs::create_dir_all(config_home).expect("create config home");
     fs::write(
         config_home.join("config.toml"),
         "[actor]\nname = \"test-actor\"\nkind = \"human\"\n",
     )
-    .unwrap();
+    .expect("write actor config");
 }
 
 /// The path a `ws` process run in `dir` reports: its canonicalized cwd.
 fn canonical(dir: &Path) -> PathBuf {
-    fs::canonicalize(dir).unwrap()
+    fs::canonicalize(dir).expect("canonicalize test dir")
 }
 
 fn stdout_lines(assert: &assert_cmd::assert::Assert) -> Vec<String> {
     String::from_utf8(assert.get_output().stdout.clone())
-        .unwrap()
+        .expect("stdout is utf-8")
         .lines()
-        .map(str::to_string)
+        .map(str::to_owned)
         .collect()
 }
 
 fn assert_line_matches(line: &str, pattern: &str) {
-    let matched = predicate::str::is_match(pattern).unwrap().eval(line);
+    let matched = predicate::str::is_match(pattern)
+        .expect("valid pattern")
+        .eval(line);
     assert!(matched, "line {line:?} does not match {pattern:?}");
 }
 
@@ -105,7 +108,10 @@ fn workspace_round_trip_works_through_the_cli() {
         .arg("diff")
         .assert()
         .success()
-        .stdout("M notes.txt\n");
+        .stdout(
+            "M notes.txt\n-hello\n\\ no newline at end of file\n\
+             +hello world\n\\ no newline at end of file\n",
+        );
 
     let not_a_workspace = TempDir::new().unwrap();
     command(config_home.path(), not_a_workspace.path())
@@ -125,5 +131,81 @@ fn workspace_round_trip_works_through_the_cli() {
         .stderr(
             "error: no actor is configured: create ~/.config/atelier/config.toml \
              with [actor] name = \"you\" kind = \"human\"\n",
+        );
+}
+
+const DOCX_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+
+const DOCX_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+
+/// A one-paragraph Word document holding `sentence`, zipped as a .docx.
+fn docx(sentence: &str) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{sentence}</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer
+        .start_file("[Content_Types].xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(DOCX_CONTENT_TYPES.as_bytes())
+        .expect("write fixture part");
+    writer
+        .start_file("_rels/.rels", options)
+        .expect("start fixture part");
+    writer
+        .write_all(DOCX_RELS.as_bytes())
+        .expect("write fixture part");
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(document.as_bytes())
+        .expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
+}
+
+#[test]
+fn a_changed_docx_diffs_as_a_markdown_line_diff() {
+    let config_home = TempDir::new().unwrap();
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().unwrap();
+    let source = TempDir::new().unwrap();
+    fs::write(
+        source.path().join("report.docx"),
+        docx("The quick brown fox jumps over the lazy dog."),
+    )
+    .unwrap();
+
+    command(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+    command(config_home.path(), workspace.path())
+        .args(["attach", source.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    fs::write(
+        workspace.path().join("report.docx"),
+        docx("The quick brown fox leaps over the lazy dog."),
+    )
+    .unwrap();
+
+    command(config_home.path(), workspace.path())
+        .arg("diff")
+        .assert()
+        .success()
+        .stdout(
+            "M report.docx\n\
+             -The quick brown fox jumps over the lazy dog.\n\
+             +The quick brown fox leaps over the lazy dog.\n",
         );
 }
