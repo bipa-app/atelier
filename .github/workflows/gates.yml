@@ -1,0 +1,31 @@
+# The repo's quality gates, exactly as run locally before landing:
+# fmt, clippy with warnings denied, and the full workspace test suite.
+# The real-documents test stays out — it is #[ignore]d and its fixtures
+# are local-only.
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
