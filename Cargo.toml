@@ -26,6 +26,7 @@ gix-hash = "0.25"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 similar = { version = "3", default-features = false, features = ["std", "text"] }
 sha2 = "0.10"
 quick-xml = "0.41"
