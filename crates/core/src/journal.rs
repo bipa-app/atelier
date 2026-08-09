@@ -24,6 +24,7 @@ pub enum Act {
 }
 
 impl Act {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WorkspaceInit => "workspace_init",
@@ -96,7 +97,7 @@ pub struct JournalEntry {
     pub reference: Option<String>,
 }
 
-/// The append-only journal, a SQLite database beside the repo.
+/// The append-only journal, a `SQLite` database beside the repo.
 pub struct Journal {
     conn: Connection,
 }

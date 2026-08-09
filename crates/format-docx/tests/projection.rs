@@ -39,10 +39,15 @@ fn docx_with(parts: &[(&str, &[u8])]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default();
     for (name, content) in parts {
-        writer.start_file(*name, options).unwrap();
-        writer.write_all(content).unwrap();
+        writer
+            .start_file(*name, options)
+            .expect("start fixture part");
+        writer.write_all(content).expect("write fixture part");
     }
-    writer.finish().unwrap().into_inner()
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
 }
 
 #[test]
@@ -727,8 +732,8 @@ fn consecutive_hard_breaks_stay_distinct_from_a_paragraph_boundary() {
 
 #[test]
 fn forbidden_characters_behind_attribute_references_are_an_error() {
-    let body = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body data="a&#1;b"><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body></w:document>"##;
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body data="a&#1;b"><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body></w:document>"#;
 
     let error = DocxPackage.project(&docx(body)).unwrap_err();
 
@@ -763,8 +768,8 @@ fn cell_paragraphs_keep_their_structure() {
 
 #[test]
 fn forbidden_references_inside_choice_branches_are_an_error() {
-    let body = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:t>&#1;</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>fallback</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"##;
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:t>&#1;</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>fallback</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"#;
 
     let error = DocxPackage.project(&docx(body)).unwrap_err();
 
@@ -884,8 +889,8 @@ fn a_dangling_styles_relationship_is_an_error() {
 
 #[test]
 fn forbidden_characters_in_relationship_parts_are_an_error() {
-    let package_rels = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml" Note="&#1;"/></Relationships>"##;
+    let package_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml" Note="&#1;"/></Relationships>"#;
     let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>text</w:t></w:r></w:p></w:body></w:document>"#;
     let bytes = docx_with(&[

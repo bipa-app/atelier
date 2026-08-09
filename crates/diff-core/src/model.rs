@@ -37,6 +37,7 @@ impl Address {
         Self(path.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -82,6 +83,7 @@ pub struct Delta {
 impl Delta {
     /// This delta raised to the text rung, carrying its line comparison and
     /// the package that projected the compared text (`None` for plain text).
+    #[must_use]
     pub fn at_text_rung(self, lines: Vec<Line>, package: Option<PackageId>) -> Self {
         Self {
             fidelity: Fidelity::Text,

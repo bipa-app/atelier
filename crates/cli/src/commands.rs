@@ -68,7 +68,7 @@ fn diff() -> Result<Vec<String>> {
 
     if diff.deltas.is_empty() {
         return Ok(vec![
-            "no changes between the two latest snapshots".to_string(),
+            "no changes between the two latest snapshots".to_owned(),
         ]);
     }
 
@@ -80,7 +80,7 @@ fn diff() -> Result<Vec<String>> {
 fn render_delta(delta: &Delta) -> Vec<String> {
     let mut rendered = vec![printable(&format!(
         "{} {}",
-        delta_label(&delta.kind),
+        delta_label(delta.kind),
         delta.address.as_str()
     ))];
     for line in &delta.lines {
@@ -149,12 +149,12 @@ fn journal() -> Result<Vec<String>> {
 
 fn workspace_name(path: &Path) -> String {
     match path.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name.to_string(),
-        None => "workspace".to_string(),
+        Some(name) => name.to_owned(),
+        None => "workspace".to_owned(),
     }
 }
 
-fn delta_label(kind: &DeltaKind) -> &'static str {
+fn delta_label(kind: DeltaKind) -> &'static str {
     match kind {
         DeltaKind::Added => "A",
         DeltaKind::Removed => "D",
@@ -190,15 +190,15 @@ mod tests {
             address: Address::new("x\n+forged.txt\u{1b}[31m"),
             kind: DeltaKind::Changed,
             fidelity: Fidelity::Binary,
-            before: Some("id1".to_string()),
-            after: Some("id2".to_string()),
+            before: Some("id1".to_owned()),
+            after: Some("id2".to_owned()),
             lines: Vec::new(),
             package: None,
         };
 
         assert_eq!(
             render_delta(&delta),
-            vec!["M x\\n+forged.txt\\u{1b}[31m".to_string()]
+            vec!["M x\\n+forged.txt\\u{1b}[31m".to_owned()]
         );
     }
 

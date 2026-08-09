@@ -39,7 +39,7 @@ pub enum Error {
     Config(String),
 }
 
-/// Wrap an engine-layer failure (jj, SQLite) as [`Error::Engine`].
+/// Wrap an engine-layer failure (jj, `SQLite`) as [`Error::Engine`].
 pub(crate) fn engine_err(source: impl std::fmt::Display) -> Error {
     Error::Engine(source.to_string())
 }

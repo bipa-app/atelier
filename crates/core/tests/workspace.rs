@@ -10,16 +10,17 @@ fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[expect(unsafe_code, reason = "set_var wires the workspace to the test config")]
 fn set_actor(config_home: &Path) {
-    fs::create_dir_all(config_home).unwrap();
+    fs::create_dir_all(config_home).expect("create config home");
     fs::write(
         config_home.join("config.toml"),
         "[actor]\nname = \"test-actor\"\nkind = \"human\"\n",
     )
-    .unwrap();
+    .expect("write actor config");
     // SAFETY: every test holds `env_lock()` for its whole body, so no other
     // thread reads or writes the environment concurrently.
     unsafe {
@@ -27,6 +28,10 @@ fn set_actor(config_home: &Path) {
     }
 }
 
+#[expect(
+    unsafe_code,
+    reason = "set_var repoints the workspace config in a locked test"
+)]
 fn point_config_home(config_home: &Path) {
     // SAFETY: as above; guarded by `env_lock()`.
     unsafe {
@@ -177,9 +182,16 @@ fn docx(sentence: &str) -> Vec<u8> {
     );
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
-    writer.start_file("word/document.xml", options).unwrap();
-    writer.write_all(document.as_bytes()).unwrap();
-    writer.finish().unwrap().into_inner()
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(document.as_bytes())
+        .expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
 }
 
 #[test]
@@ -202,7 +214,7 @@ fn changed_docx_raises_to_text_rung_carrying_its_package_and_reuses_the_cache() 
     assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
     assert_eq!(
         diff.deltas[0].package.map(|package| package.to_string()),
-        Some("format-docx@0.1.0".to_string())
+        Some("format-docx@0.1.0".to_owned())
     );
 
     // The second diff of the same snapshots serves both sides from the

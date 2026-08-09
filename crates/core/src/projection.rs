@@ -43,7 +43,7 @@ impl ProjectionCache {
         if digest != hex_sha256(text) {
             return None;
         }
-        Some(text.to_string())
+        Some(text.to_owned())
     }
 
     /// Publish `text` as the projection of `blob` by `package`: written to
@@ -76,14 +76,14 @@ impl ProjectionCache {
             }
             return Err(error.into());
         }
-        self.sweep_staged(parent, &blob.id)
+        Self::sweep_staged(parent, &blob.id)
     }
 
     /// Remove staged files earlier publishers left behind for `blob` —
     /// crashes between write and rename orphan them. A complete entry is
     /// published by the time this runs, so a missing file only means a
     /// concurrent publisher finished the same cleanup.
-    fn sweep_staged(&self, parent: &Path, blob_id: &str) -> Result<(), Error> {
+    fn sweep_staged(parent: &Path, blob_id: &str) -> Result<(), Error> {
         let staged_prefix = format!("{blob_id}.staged-");
         for sibling in fs::read_dir(parent)? {
             let sibling = sibling?;

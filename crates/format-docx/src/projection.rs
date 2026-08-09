@@ -47,7 +47,7 @@ const NUMBERING_TYPES: [&str; 2] = [
 /// three orders of magnitude.
 const MAX_PART_SIZE: u64 = 64 * 1024 * 1024;
 
-/// The namespaces WordprocessingML elements live in: the transitional one
+/// The namespaces `WordprocessingML` elements live in: the transitional one
 /// Word writes, and the ISO strict variant.
 const WORDPROCESSINGML: [&[u8]; 2] = [
     b"http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -73,7 +73,7 @@ const OUTLINE_BODY_TEXT: usize = 9;
 const NUMBERING_REMOVED: &str = "0";
 
 /// Nested list items indent three spaces per level: enough to sit inside
-/// the content column of both `- ` and `1. ` parent markers, so CommonMark
+/// the content column of both `- ` and `1. ` parent markers, so `CommonMark`
 /// keeps the hierarchy.
 const LIST_INDENT: &str = "   ";
 
@@ -130,17 +130,17 @@ pub(crate) fn markdown(bytes: &[u8]) -> Result<String, DocxError> {
             Some(target) => target,
             None => {
                 return Err(DocxError::Structure(
-                    "the package names no officeDocument relationship".to_string(),
+                    "the package names no officeDocument relationship".to_owned(),
                 ));
             }
         },
-        None => DOCUMENT_PART.to_string(),
+        None => DOCUMENT_PART.to_owned(),
     };
     let Some(document) = part(&mut archive, &document_path)? else {
         return Err(DocxError::MissingDocument);
     };
     let document_dir = match document_path.rsplit_once('/') {
-        Some((dir, _)) => dir.to_string(),
+        Some((dir, _)) => dir.to_owned(),
         None => String::new(),
     };
     let document_name = match document_path.rsplit_once('/') {
@@ -161,8 +161,8 @@ pub(crate) fn markdown(bytes: &[u8]) -> Result<String, DocxError> {
             relationship_target(xml, &document_dir, &NUMBERING_TYPES)?,
         ),
         None => (
-            Some(STYLES_PART.to_string()),
-            Some(NUMBERING_PART.to_string()),
+            Some(STYLES_PART.to_owned()),
+            Some(NUMBERING_PART.to_owned()),
         ),
     };
     let related = document_rels.is_some();
@@ -244,7 +244,7 @@ fn relationship_target(
             }
             (_, Event::CData(data)) => {
                 let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_string())
+                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
                 frame.characters(false)?;
@@ -253,19 +253,19 @@ fn relationship_target(
                 ensure_xml_chars(&resolve_reference(&reference)?)?;
                 frame.characters(false)?;
             }
-            (_, Event::Decl(_)) | (_, Event::DocType(_)) => {
+            (_, Event::Decl(_) | Event::DocType(_)) => {
                 frame.prolog_declaration()?;
             }
             (_, Event::Comment(text)) => {
                 let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_string())
+                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
             }
             (_, Event::PI(instruction)) => {
                 let content = std::str::from_utf8(&instruction).map_err(|_| {
                     DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_string(),
+                        "processing-instruction content is not valid UTF-8".to_owned(),
                     )
                 })?;
                 ensure_xml_chars(content)?;
@@ -341,7 +341,7 @@ fn in_relationships(resolve: &ResolveResult<'_>) -> bool {
 /// segments.
 fn resolved_target(base: &str, target: &str) -> String {
     if let Some(absolute) = target.strip_prefix('/') {
-        return absolute.to_string();
+        return absolute.to_owned();
     }
     let mut segments: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
     for segment in target.split('/') {
@@ -399,7 +399,7 @@ fn utf16(bytes: &[u8], name: &str, decode: fn([u8; 2]) -> u16) -> Result<String,
 }
 
 /// Element balance and root accounting for one part's walk: exactly one
-/// root, it must be the expected WordprocessingML element, nothing may
+/// root, it must be the expected `WordprocessingML` element, nothing may
 /// follow it, and reaching EOF with anything open is truncation.
 struct PartFrame {
     label: &'static str,
@@ -469,7 +469,7 @@ impl PartFrame {
         self.depth = self
             .depth
             .checked_sub(1)
-            .ok_or_else(|| DocxError::Structure("end tag without a matching start".to_string()))?;
+            .ok_or_else(|| DocxError::Structure("end tag without a matching start".to_owned()))?;
         if self.depth == 0 {
             if !(wordprocessingml && local_name == self.root) {
                 return Err(DocxError::Structure(format!(
@@ -577,7 +577,7 @@ fn walk(
             }
             (_, Event::CData(data)) => {
                 let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_string())
+                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
                 frame.characters(false)?;
@@ -593,19 +593,19 @@ fn walk(
                     document.text(&content)?;
                 }
             }
-            (_, Event::Decl(_)) | (_, Event::DocType(_)) => {
+            (_, Event::Decl(_) | Event::DocType(_)) => {
                 frame.prolog_declaration()?;
             }
             (_, Event::Comment(text)) => {
                 let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_string())
+                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
             }
             (_, Event::PI(instruction)) => {
                 let content = std::str::from_utf8(&instruction).map_err(|_| {
                     DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_string(),
+                        "processing-instruction content is not valid UTF-8".to_owned(),
                     )
                 })?;
                 ensure_xml_chars(content)?;
@@ -758,7 +758,7 @@ struct Document<'a> {
     in_text: bool,
     /// The content column each open list level's last marker reached,
     /// keyed by numbering instance: children indent to their own
-    /// instance's parent column so CommonMark keeps the hierarchy under
+    /// instance's parent column so `CommonMark` keeps the hierarchy under
     /// markers of any width and unrelated lists never leak state.
     marker_columns: BTreeMap<(String, usize), usize>,
     /// Each numbering instance's next ordinal per level: items advance
@@ -920,7 +920,7 @@ impl<'a> Document<'a> {
             b"sym" if !self.in_properties => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
                     let value = attribute(reader, start, b"char")?.ok_or_else(|| {
-                        DocxError::Structure("sym without a char attribute".to_string())
+                        DocxError::Structure("sym without a char attribute".to_owned())
                     })?;
                     paragraph.text.push(sym_char(&value)?);
                 }
@@ -939,9 +939,7 @@ impl<'a> Document<'a> {
             b"tr" => match self.tables.last_mut() {
                 Some(table) => table.rows.push(Row::default()),
                 None => {
-                    return Err(DocxError::Structure(
-                        "table row outside a table".to_string(),
-                    ));
+                    return Err(DocxError::Structure("table row outside a table".to_owned()));
                 }
             },
             b"tc" => match self
@@ -952,7 +950,7 @@ impl<'a> Document<'a> {
                 Some(row) => row.cells.push(Cell::default()),
                 None => {
                     return Err(DocxError::Structure(
-                        "table cell outside a table row".to_string(),
+                        "table cell outside a table row".to_owned(),
                     ));
                 }
             },
@@ -973,14 +971,14 @@ impl<'a> Document<'a> {
             b"t" => self.in_text = false,
             b"p" => {
                 let mut paragraph = self.paragraph.take().ok_or_else(|| {
-                    DocxError::Structure("paragraph end without a paragraph".to_string())
+                    DocxError::Structure("paragraph end without a paragraph".to_owned())
                 })?;
                 // Paragraphs inside a deleted row or cell neither consume
                 // nor produce merge text: their content — even under a
                 // deleted paragraph mark — never reaches the accepted
                 // body, and carried text must not leak through them.
                 if self.in_deleted_container() {
-                    self.finish_paragraph(paragraph)?;
+                    self.finish_paragraph(&paragraph)?;
                 } else {
                     if let Some(carried) = self.carry.take() {
                         paragraph.text = format!("{carried}{}", paragraph.text);
@@ -990,7 +988,7 @@ impl<'a> Document<'a> {
                         // next paragraph instead of ending one here.
                         self.carry = Some(paragraph.text);
                     } else {
-                        self.finish_paragraph(paragraph)?;
+                        self.finish_paragraph(&paragraph)?;
                     }
                 }
             }
@@ -998,7 +996,7 @@ impl<'a> Document<'a> {
             // with nothing following; its carried text still projects.
             b"body" => {
                 if let Some(carried) = self.carry.take() {
-                    self.finish_paragraph(Paragraph {
+                    self.finish_paragraph(&Paragraph {
                         text: carried,
                         ..Paragraph::default()
                     })?;
@@ -1008,7 +1006,7 @@ impl<'a> Document<'a> {
                 let table = self
                     .tables
                     .pop()
-                    .ok_or_else(|| DocxError::Structure("table end without a table".to_string()))?;
+                    .ok_or_else(|| DocxError::Structure("table end without a table".to_owned()))?;
                 if let Some(rendered) = render_table(&table) {
                     self.push_block(rendered)?;
                 }
@@ -1027,7 +1025,7 @@ impl<'a> Document<'a> {
                 paragraph.text.push_str(content);
                 Ok(())
             }
-            None => Err(DocxError::Structure("text outside a paragraph".to_string())),
+            None => Err(DocxError::Structure("text outside a paragraph".to_owned())),
         }
     }
 
@@ -1038,7 +1036,7 @@ impl<'a> Document<'a> {
     /// prefix — heading marks, then any list marker — is prepended, so
     /// markers are the only unescaped structure and no document text can
     /// impersonate one: distinct documents never project alike.
-    fn finish_paragraph(&mut self, paragraph: Paragraph) -> Result<(), DocxError> {
+    fn finish_paragraph(&mut self, paragraph: &Paragraph) -> Result<(), DocxError> {
         // An empty paragraph still projects — as an empty block — so
         // inserting or removing one is a visible edit.
         let text = if paragraph.text.is_empty() {
@@ -1052,8 +1050,8 @@ impl<'a> Document<'a> {
             return self.push_into_cell(text);
         }
         let listed = self
-            .listing(&paragraph)
-            .map(|(num_id, level)| (num_id.map(str::to_string), level));
+            .listing(paragraph)
+            .map(|(num_id, level)| (num_id.map(str::to_owned), level));
         if let Some((Some(id), level)) = &listed {
             // A parent item advancing — whatever its marker kind —
             // restarts deeper ordered levels, each per its own
@@ -1080,7 +1078,7 @@ impl<'a> Document<'a> {
                 self.ordinals.remove(&key);
             }
         }
-        let marked = match listed {
+        let list_item = match listed {
             Some((Some(id), level)) => {
                 let def = self.level_def(Some(&id), level);
                 match def.kind {
@@ -1088,14 +1086,14 @@ impl<'a> Document<'a> {
                         let marker = format!("{}.", self.next_ordinal(&id, level, def.start));
                         Some((marker, level, id))
                     }
-                    ListKind::Bullet => Some(("-".to_string(), level, id)),
+                    ListKind::Bullet => Some(("-".to_owned(), level, id)),
                     ListKind::Unmarked => None,
                 }
             }
             // A `numPr` without a `numId` carries no definition: unmarked.
             Some((None, _)) | None => None,
         };
-        let block = match (self.heading(&paragraph), marked) {
+        let block = match (self.heading(paragraph), list_item) {
             (Some(heading), Some((marker, _, _))) => {
                 self.marker_columns.clear();
                 format!("{} {marker} {text}", "#".repeat(heading))
@@ -1133,7 +1131,7 @@ impl<'a> Document<'a> {
     }
 
     /// The indentation a list item at `level` renders with: its own
-    /// numbering instance's parent marker content column, so CommonMark
+    /// numbering instance's parent marker content column, so `CommonMark`
     /// keeps the hierarchy under markers of any width ("10. " needs four
     /// columns) and unrelated instances never leak indentation. A child
     /// with no rendered parent falls back to three spaces per level.
@@ -1143,7 +1141,7 @@ impl<'a> Document<'a> {
         }
         match level
             .checked_sub(1)
-            .and_then(|parent| self.marker_columns.get(&(id.to_string(), parent)))
+            .and_then(|parent| self.marker_columns.get(&(id.to_owned(), parent)))
         {
             Some(column) => " ".repeat(*column),
             None => LIST_INDENT.repeat(level),
@@ -1154,10 +1152,7 @@ impl<'a> Document<'a> {
     /// instance's counter. Sublevel restarts happen when any parent item
     /// finishes, whatever its marker kind.
     fn next_ordinal(&mut self, id: &str, level: usize, start: u32) -> u32 {
-        let counter = self
-            .ordinals
-            .entry((id.to_string(), level))
-            .or_insert(start);
+        let counter = self.ordinals.entry((id.to_owned(), level)).or_insert(start);
         let value = *counter;
         *counter = counter.saturating_add(1);
         value
@@ -1258,7 +1253,7 @@ impl<'a> Document<'a> {
             .and_then(|table| table.rows.last_mut())
             .and_then(|row| row.cells.last_mut())
             .ok_or_else(|| {
-                DocxError::Structure("paragraph inside a table but outside a cell".to_string())
+                DocxError::Structure("paragraph inside a table but outside a cell".to_owned())
             })?;
         cell.paragraphs.push(content);
         Ok(())
@@ -1278,7 +1273,7 @@ impl<'a> Document<'a> {
             || !self.tables.is_empty()
         {
             return Err(DocxError::Structure(
-                "document ended mid-element".to_string(),
+                "document ended mid-element".to_owned(),
             ));
         }
         Ok(())
@@ -1307,7 +1302,7 @@ fn escaped_markdown(text: &str) -> String {
             // escape), so consecutive hard breaks stay distinct from a
             // paragraph boundary's blank line.
             if line.is_empty() {
-                "\\".to_string()
+                "\\".to_owned()
             } else {
                 escaped_markdown_line(line)
             }
@@ -1508,7 +1503,7 @@ fn resolved_styles(
             }
             (_, Event::CData(data)) => {
                 let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_string())
+                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
                 frame.characters(false)?;
@@ -1517,19 +1512,19 @@ fn resolved_styles(
                 ensure_xml_chars(&resolve_reference(&reference)?)?;
                 frame.characters(false)?;
             }
-            (_, Event::Decl(_)) | (_, Event::DocType(_)) => {
+            (_, Event::Decl(_) | Event::DocType(_)) => {
                 frame.prolog_declaration()?;
             }
             (_, Event::Comment(text)) => {
                 let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_string())
+                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
             }
             (_, Event::PI(instruction)) => {
                 let content = std::str::from_utf8(&instruction).map_err(|_| {
                     DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_string(),
+                        "processing-instruction content is not valid UTF-8".to_owned(),
                     )
                 })?;
                 ensure_xml_chars(content)?;
@@ -1618,7 +1613,7 @@ fn resolved_chains(
                     chain.numbering = Some((num_id.clone(), def.ilvl));
                 }
             }
-            memo.insert(step.to_string(), chain.clone());
+            memo.insert(step.to_owned(), chain.clone());
             base = chain;
         }
     }
@@ -1642,7 +1637,7 @@ fn style_element<R>(
                 let default = attribute(reader, start, b"default")?;
                 if default_style.is_none()
                     && kind.as_deref() == Some("paragraph")
-                    && matches!(default.as_deref(), Some("1") | Some("true") | Some("on"))
+                    && matches!(default.as_deref(), Some("1" | "true" | "on"))
                 {
                     *default_style = Some(id.clone());
                 }
@@ -1826,7 +1821,7 @@ fn numbering_part(xml: &str) -> Result<NumberingPart, DocxError> {
             }
             (_, Event::CData(data)) => {
                 let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_string())
+                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
                 frame.characters(false)?;
@@ -1835,19 +1830,19 @@ fn numbering_part(xml: &str) -> Result<NumberingPart, DocxError> {
                 ensure_xml_chars(&resolve_reference(&reference)?)?;
                 frame.characters(false)?;
             }
-            (_, Event::Decl(_)) | (_, Event::DocType(_)) => {
+            (_, Event::Decl(_) | Event::DocType(_)) => {
                 frame.prolog_declaration()?;
             }
             (_, Event::Comment(text)) => {
                 let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_string())
+                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
                 })?;
                 ensure_xml_chars(content)?;
             }
             (_, Event::PI(instruction)) => {
                 let content = std::str::from_utf8(&instruction).map_err(|_| {
                     DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_string(),
+                        "processing-instruction content is not valid UTF-8".to_owned(),
                     )
                 })?;
                 ensure_xml_chars(content)?;
@@ -2058,7 +2053,7 @@ fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, DocxError> {
     }
     let name = reference.xml10_content().map_err(quick_xml::Error::from)?;
     match resolve_xml_entity(&name) {
-        Some(replacement) => Ok(replacement.to_string()),
+        Some(replacement) => Ok(replacement.to_owned()),
         None => Err(DocxError::Structure(format!(
             "unresolvable entity reference &{name};"
         ))),
@@ -2066,7 +2061,7 @@ fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, DocxError> {
 }
 
 /// The value of the `name` attribute on `start`, matched by local name for
-/// attributes in no namespace or the WordprocessingML one. Every
+/// attributes in no namespace or the `WordprocessingML` one. Every
 /// attribute's prefix must resolve — an undeclared prefix is malformed
 /// XML, and accepting it would project silently wrong markdown.
 fn attribute<R>(

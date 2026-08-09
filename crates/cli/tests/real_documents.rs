@@ -27,7 +27,7 @@ fn fixtures() -> PathBuf {
 }
 
 fn command(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").unwrap();
+    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -35,16 +35,20 @@ fn command(config_home: &Path, current_dir: &Path) -> Command {
 }
 
 fn write_actor_config(config_home: &Path) {
-    fs::create_dir_all(config_home).unwrap();
+    fs::create_dir_all(config_home).expect("create config home");
     fs::write(
         config_home.join("config.toml"),
         "[actor]\nname = \"test-actor\"\nkind = \"human\"\n",
     )
-    .unwrap();
+    .expect("write actor config");
 }
 
 #[test]
 #[ignore = "needs local fixtures/real/{old,new}.docx (confidential, gitignored)"]
+#[expect(
+    unsafe_code,
+    reason = "set_var wires the in-process Workspace to the test config"
+)]
 fn real_word_revisions_diff_at_the_text_rung() {
     let old = fixtures().join("old.docx");
     let new = fixtures().join("new.docx");

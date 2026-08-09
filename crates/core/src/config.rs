@@ -24,6 +24,7 @@ pub enum ActorKind {
 }
 
 impl ActorKind {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Human => "human",
@@ -70,9 +71,8 @@ struct ActorSection {
 /// `~/.config/atelier/config.toml`. A missing file or a file without an
 /// `[actor]` section yields [`Error::NoActorConfigured`].
 pub fn resolve_actor() -> Result<Actor, Error> {
-    let path = match actor_config_path() {
-        Some(path) => path,
-        None => return Err(Error::NoActorConfigured),
+    let Some(path) = actor_config_path() else {
+        return Err(Error::NoActorConfigured);
     };
     if !path.is_file() {
         return Err(Error::NoActorConfigured);

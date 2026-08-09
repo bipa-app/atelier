@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn command(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").unwrap();
+    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -15,29 +15,31 @@ fn command(config_home: &Path, current_dir: &Path) -> Command {
 }
 
 fn write_actor_config(config_home: &Path) {
-    fs::create_dir_all(config_home).unwrap();
+    fs::create_dir_all(config_home).expect("create config home");
     fs::write(
         config_home.join("config.toml"),
         "[actor]\nname = \"test-actor\"\nkind = \"human\"\n",
     )
-    .unwrap();
+    .expect("write actor config");
 }
 
 /// The path a `ws` process run in `dir` reports: its canonicalized cwd.
 fn canonical(dir: &Path) -> PathBuf {
-    fs::canonicalize(dir).unwrap()
+    fs::canonicalize(dir).expect("canonicalize test dir")
 }
 
 fn stdout_lines(assert: &assert_cmd::assert::Assert) -> Vec<String> {
     String::from_utf8(assert.get_output().stdout.clone())
-        .unwrap()
+        .expect("stdout is utf-8")
         .lines()
-        .map(str::to_string)
+        .map(str::to_owned)
         .collect()
 }
 
 fn assert_line_matches(line: &str, pattern: &str) {
-    let matched = predicate::str::is_match(pattern).unwrap().eval(line);
+    let matched = predicate::str::is_match(pattern)
+        .expect("valid pattern")
+        .eval(line);
     assert!(matched, "line {line:?} does not match {pattern:?}");
 }
 
@@ -146,13 +148,28 @@ fn docx(sentence: &str) -> Vec<u8> {
     );
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
-    writer.start_file("[Content_Types].xml", options).unwrap();
-    writer.write_all(DOCX_CONTENT_TYPES.as_bytes()).unwrap();
-    writer.start_file("_rels/.rels", options).unwrap();
-    writer.write_all(DOCX_RELS.as_bytes()).unwrap();
-    writer.start_file("word/document.xml", options).unwrap();
-    writer.write_all(document.as_bytes()).unwrap();
-    writer.finish().unwrap().into_inner()
+    writer
+        .start_file("[Content_Types].xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(DOCX_CONTENT_TYPES.as_bytes())
+        .expect("write fixture part");
+    writer
+        .start_file("_rels/.rels", options)
+        .expect("start fixture part");
+    writer
+        .write_all(DOCX_RELS.as_bytes())
+        .expect("write fixture part");
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(document.as_bytes())
+        .expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
 }
 
 #[test]

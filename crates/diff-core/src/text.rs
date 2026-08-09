@@ -4,6 +4,7 @@ use crate::model::{Line, LineKind};
 
 /// The bytes as text, when they are valid UTF-8 without NUL — the
 /// precondition for diffing at the text rung without a projection.
+#[must_use]
 pub fn as_text(bytes: &[u8]) -> Option<&str> {
     let text = str::from_utf8(bytes).ok()?;
     if text.contains('\0') {
@@ -24,6 +25,7 @@ pub const NO_NEWLINE_MARKER: &str = "\\ no newline at end of file";
 /// line strips its one trailing `\n` but keeps a `\r` — a CRLF conversion
 /// stays visible — and a changed line without any trailing newline is
 /// followed by [`NO_NEWLINE_MARKER`].
+#[must_use]
 pub fn diff_lines(before: &str, after: &str) -> Vec<Line> {
     let mut lines = Vec::new();
     for change in TextDiff::from_lines(before, after).iter_all_changes() {
@@ -40,12 +42,12 @@ pub fn diff_lines(before: &str, after: &str) -> Vec<Line> {
         let newline_missing = !raw.ends_with('\n');
         lines.push(Line {
             kind,
-            text: text.to_string(),
+            text: text.to_owned(),
         });
         if newline_missing {
             lines.push(Line {
                 kind: LineKind::NoNewline,
-                text: NO_NEWLINE_MARKER.to_string(),
+                text: NO_NEWLINE_MARKER.to_owned(),
             });
         }
     }
@@ -59,7 +61,7 @@ mod tests {
     fn line(kind: LineKind, text: &str) -> Line {
         Line {
             kind,
-            text: text.to_string(),
+            text: text.to_owned(),
         }
     }
 

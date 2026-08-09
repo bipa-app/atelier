@@ -10,6 +10,7 @@ use crate::model::{Address, Delta, DeltaKind, Diff, Fidelity};
 /// delta. Deltas come back sorted by path, so the same inputs always produce
 /// the same diff. `Moved` is never produced here — it needs the engine's
 /// rename detection, not a content-id comparison.
+#[must_use]
 pub fn diff_listings(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Diff {
     let paths: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
 
@@ -55,7 +56,7 @@ mod tests {
     fn listing(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         entries
             .iter()
-            .map(|(path, id)| ((*path).to_string(), (*id).to_string()))
+            .map(|(path, id)| ((*path).to_owned(), (*id).to_owned()))
             .collect()
     }
 
@@ -72,7 +73,7 @@ mod tests {
         assert_eq!(delta.kind, DeltaKind::Added);
         assert_eq!(delta.fidelity, Fidelity::Binary);
         assert_eq!(delta.before, None);
-        assert_eq!(delta.after, Some("id1".to_string()));
+        assert_eq!(delta.after, Some("id1".to_owned()));
         assert!(delta.lines.is_empty());
     }
 
@@ -87,7 +88,7 @@ mod tests {
         let delta = &diff.deltas[0];
         assert_eq!(delta.kind, DeltaKind::Removed);
         assert_eq!(delta.fidelity, Fidelity::Binary);
-        assert_eq!(delta.before, Some("id1".to_string()));
+        assert_eq!(delta.before, Some("id1".to_owned()));
         assert_eq!(delta.after, None);
     }
 
@@ -102,8 +103,8 @@ mod tests {
         let delta = &diff.deltas[0];
         assert_eq!(delta.kind, DeltaKind::Changed);
         assert_eq!(delta.fidelity, Fidelity::Binary);
-        assert_eq!(delta.before, Some("id1".to_string()));
-        assert_eq!(delta.after, Some("id2".to_string()));
+        assert_eq!(delta.before, Some("id1".to_owned()));
+        assert_eq!(delta.after, Some("id2".to_owned()));
     }
 
     #[test]

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 atelier-diff-core = { path = "../diff-core" }
 quick-xml.workspace = true

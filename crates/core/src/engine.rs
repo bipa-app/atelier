@@ -114,7 +114,7 @@ impl Engine {
         let name = self.ws.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
-            None => return Err(Error::Engine("no working-copy commit".to_string())),
+            None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
         let base_ignores = base_ignores()?;
         let options = SnapshotOptions {
@@ -143,7 +143,7 @@ impl Engine {
             let op = locked.locked_wc().old_operation_id().clone();
             locked.finish(op).await.map_err(engine_err)?;
             return Err(Error::Engine(
-                "working copy has paths with invalid utf-8 names".to_string(),
+                "working copy has paths with invalid utf-8 names".to_owned(),
             ));
         }
 
@@ -184,7 +184,7 @@ impl Engine {
         let name = self.ws.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
-            None => return Err(Error::Engine("no working-copy commit".to_string())),
+            None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
         let root = self.repo.store().root_commit_id().clone();
         let mut out = Vec::new();
@@ -226,7 +226,7 @@ impl Engine {
         let name = self.ws.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
-            None => return Err(Error::Engine("no working-copy commit".to_string())),
+            None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
         let root = self.repo.store().root_commit_id().clone();
         let commit = self.repo.store().get_commit(&wc_id).map_err(engine_err)?;
@@ -309,7 +309,7 @@ impl Engine {
         let mut after = BTreeMap::new();
         let mut stream = old_tree.diff_stream(&new_tree, &EverythingMatcher);
         while let Some(entry) = stream.next().await {
-            let path = entry.path.as_internal_file_string().to_string();
+            let path = entry.path.as_internal_file_string().to_owned();
             let values = entry.values.map_err(engine_err)?;
             if values.before.is_present() {
                 before.insert(path.clone(), format!("{:?}", values.before));
@@ -330,9 +330,8 @@ impl Engine {
     }
 
     fn tree_at(&self, id: &str) -> Result<MergedTree, Error> {
-        let commit_id = match CommitId::try_from_hex(id) {
-            Some(commit_id) => commit_id,
-            None => return Err(Error::Engine(format!("not a snapshot id: {id}"))),
+        let Some(commit_id) = CommitId::try_from_hex(id) else {
+            return Err(Error::Engine(format!("not a snapshot id: {id}")));
         };
         let commit = self
             .repo

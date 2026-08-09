@@ -217,14 +217,13 @@ impl Workspace {
         address: &str,
         blob: &FileBlob,
     ) -> Result<Option<&dyn FormatPackage>, Error> {
-        match catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(package) = catch_unwind(AssertUnwindSafe(|| {
             detect_package(&self.packages, address, &blob.bytes)
         })) {
-            Ok(package) => Ok(package),
-            Err(_) => {
-                self.package_failed(address, None, "a package panicked during detection")?;
-                Ok(None)
-            }
+            Ok(package)
+        } else {
+            self.package_failed(address, None, "a package panicked during detection")?;
+            Ok(None)
         }
     }
 
@@ -311,8 +310,8 @@ fn builtin_packages() -> Vec<Box<dyn FormatPackage>> {
 
 fn workspace_name(root: &Path) -> String {
     match root.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name.to_string(),
-        None => "workspace".to_string(),
+        Some(name) => name.to_owned(),
+        None => "workspace".to_owned(),
     }
 }
 

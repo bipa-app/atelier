@@ -78,6 +78,7 @@ pub trait FormatPackage {
 /// The package that claims the document most confidently; equal claims
 /// break by package id, so selection is deterministic whatever order the
 /// registry was built in.
+#[must_use]
 pub fn detect_package<'a>(
     packages: &'a [Box<dyn FormatPackage>],
     path: &str,
@@ -137,7 +138,11 @@ mod tests {
         }
     }
 
-    fn fake(name: &'static str, extension: &'static str, confidence: Confidence) -> Box<Fake> {
+    fn fake(
+        name: &'static str,
+        extension: &'static str,
+        confidence: Confidence,
+    ) -> Box<dyn FormatPackage> {
         Box::new(Fake {
             name,
             extension,
