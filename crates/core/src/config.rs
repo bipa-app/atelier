@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, config_err};
 
 /// The actor a workspace attributes its snapshots and journal entries to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Actor {
     pub name: String,
     pub kind: ActorKind,
@@ -151,6 +151,10 @@ impl fmt::Display for SyncPolicy {
 pub struct WorkspaceConfig {
     pub schema: u32,
     pub workspace: WorkspaceSection,
+    #[serde(default)]
+    pub landing: LandingPolicy,
+    #[serde(default)]
+    pub journal: JournalPolicy,
     #[serde(default, rename = "source")]
     pub sources: Vec<Source>,
 }
@@ -160,11 +164,59 @@ pub struct WorkspaceSection {
     pub name: String,
 }
 
+/// The `[landing]` policy: what a landing request needs before its change
+/// lands (ADR-0007). The default profile takes one approval, allows
+/// self-approval, and dismisses approvals when the change gains a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LandingPolicy {
+    pub approvals: u32,
+    pub allow_self_approve: bool,
+    pub dismiss_approvals_on_new_snapshots: bool,
+}
+
+impl Default for LandingPolicy {
+    fn default() -> Self {
+        Self {
+            approvals: 1,
+            allow_self_approve: true,
+            dismiss_approvals_on_new_snapshots: true,
+        }
+    }
+}
+
+/// The `[journal]` policy: how much of a session's instruction the journal
+/// keeps (ADR-0004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JournalPolicy {
+    pub instruction_fidelity: InstructionFidelity,
+}
+
+impl Default for JournalPolicy {
+    fn default() -> Self {
+        Self {
+            instruction_fidelity: InstructionFidelity::Summary,
+        }
+    }
+}
+
+/// What the journal records of an instruction: the summary plus run
+/// reference, or additionally the verbatim body (audit profiles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstructionFidelity {
+    Summary,
+    Verbatim,
+}
+
 impl WorkspaceConfig {
     pub fn new(name: String) -> Self {
         Self {
             schema: 1,
             workspace: WorkspaceSection { name },
+            landing: LandingPolicy::default(),
+            journal: JournalPolicy::default(),
             sources: Vec::new(),
         }
     }

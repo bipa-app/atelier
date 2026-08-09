@@ -4,8 +4,8 @@ use thiserror::Error;
 
 /// Every way a core operation can fail.
 ///
-/// The first six variants are domain outcomes callers match on by name; the
-/// last three wrap a lower layer (the engine, the filesystem, config parsing)
+/// The domain variants are outcomes callers match on by name; the last
+/// three wrap a lower layer (the engine, the filesystem, config parsing)
 /// whose detail is carried as a message.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -26,6 +26,44 @@ pub enum Error {
 
     #[error("no actor is configured")]
     NoActorConfigured,
+
+    #[error("no session {0}")]
+    SessionNotFound(String),
+
+    #[error("session {id} is {state}")]
+    SessionClosed { id: String, state: String },
+
+    #[error("no landing request {0}")]
+    RequestNotFound(String),
+
+    #[error("landing request {id} is {state}")]
+    RequestClosed { id: String, state: String },
+
+    #[error(
+        "landing request {0} is parked on a conflict; a new snapshot on its change re-opens the gate"
+    )]
+    RequestParked(String),
+
+    #[error("this workspace forbids approving your own landing request")]
+    SelfApprovalForbidden,
+
+    #[error("approvals were dismissed: the change has a new snapshot {new_snapshot}")]
+    ApprovalsDismissed { new_snapshot: String },
+
+    #[error("the landing lease is held by {holder} until {expires_at_ms}")]
+    LeaseHeld { holder: String, expires_at_ms: i64 },
+
+    #[error("path {0} leaves the session working copy")]
+    PathOutsideWorkingCopy(String),
+
+    #[error("no format package projects {0} and it is not utf-8 text")]
+    NotText(String),
+
+    #[error("read windows span 1 to {max} bytes")]
+    WindowTooLarge { max: usize },
+
+    #[error("package {package} failed: {reason}")]
+    PackageFailed { package: String, reason: String },
 
     #[error("engine error: {0}")]
     Engine(String),
