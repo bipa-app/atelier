@@ -186,7 +186,7 @@ impl Workspace {
                 self.file_too_large(delta.address.as_str())?;
                 return Ok(delta);
             }
-            _ => return Ok(delta),
+            (Side::Absent, _) | (_, Side::Absent) => return Ok(delta),
         };
         if let Some(package) = self.detected(delta.address.as_str(), &after)? {
             let projections = (

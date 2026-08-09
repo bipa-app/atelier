@@ -1539,10 +1539,7 @@ fn resolved_styles(
     let chains = resolved_chains(&styles)?;
     let mut resolved = BTreeMap::new();
     for (id, chain) in chains {
-        let outline = match chain.outline {
-            Some(level) if level != OUTLINE_BODY_TEXT => Some(level),
-            _ => None,
-        };
+        let outline = chain.outline.filter(|level| *level != OUTLINE_BODY_TEXT);
         if outline.is_some() || chain.numbering.is_some() {
             resolved.insert(
                 id,
