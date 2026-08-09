@@ -1,11 +1,12 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use atelier_core::{Delta, DeltaKind, LineKind, Workspace};
+use anyhow::{Context, Result, bail};
+use atelier_core::{GateOutcome, JournalEntry, RequestId, Workspace, printable, render_diff};
 use clap::{Parser, Subcommand};
 
 const JOURNAL_LIMIT: usize = 100;
+const LOG_LIMIT: usize = 100;
 
 #[derive(Debug, Parser)]
 #[command(name = "ws", about = "Versioned workspaces for humans and agents")]
@@ -24,6 +25,26 @@ enum Command {
     Diff,
     /// Show recent workspace acts.
     Journal,
+    /// Show the shared line's snapshots, newest first.
+    Log,
+    /// Show every session, newest first.
+    Sessions,
+    /// Show every landing request, newest first.
+    Requests,
+    /// Approve a landing request; a satisfied gate lands the change.
+    Approve { request: String },
+    /// Reject a landing request.
+    Reject {
+        request: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Serve the workspace to agents.
+    Serve {
+        /// Speak MCP over stdio, one client per process.
+        #[arg(long)]
+        mcp_stdio: bool,
+    },
 }
 
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
@@ -32,6 +53,12 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Attach { folder } => attach(&folder),
         Command::Diff => diff(),
         Command::Journal => journal(),
+        Command::Log => log(),
+        Command::Sessions => sessions(),
+        Command::Requests => requests(),
+        Command::Approve { request } => approve(&request),
+        Command::Reject { request, reason } => reject(&request, reason.as_deref()),
+        Command::Serve { mcp_stdio } => serve(mcp_stdio),
     }
 }
 
@@ -62,8 +89,7 @@ fn attach(folder: &Path) -> Result<Vec<String>> {
 }
 
 fn diff() -> Result<Vec<String>> {
-    let root = env::current_dir().context("read the current directory")?;
-    let mut workspace = Workspace::open(root)?;
+    let mut workspace = open_current()?;
     let diff = workspace.diff_latest()?;
 
     if diff.deltas.is_empty() {
@@ -72,93 +98,155 @@ fn diff() -> Result<Vec<String>> {
         ]);
     }
 
-    Ok(diff.deltas.iter().flat_map(render_delta).collect())
-}
-
-/// The delta's listing line, then its line comparison when the ladder
-/// raised it to the text rung; a binary-rung delta stays a bare listing.
-fn render_delta(delta: &Delta) -> Vec<String> {
-    let mut rendered = vec![printable(&format!(
-        "{} {}",
-        delta_label(delta.kind),
-        delta.address.as_str()
-    ))];
-    for line in &delta.lines {
-        match line.kind {
-            LineKind::Removed => rendered.push(format!("-{}", printable(&line.text))),
-            LineKind::Added => rendered.push(format!("+{}", printable(&line.text))),
-            // The synthetic marker prints bare, as git does — content
-            // lines always carry a sign, so the two can never collide.
-            LineKind::NoNewline => rendered.push(line.text.clone()),
-        }
-    }
-    rendered
-}
-
-/// The line with control characters escaped, so a diffed document cannot
-/// inject escape sequences into the terminal that reads it; tabs stay
-/// literal. Bidi formatting characters escape too — they are not
-/// `char::is_control`, but they can visually reorder or conceal diff
-/// content.
-fn printable(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        // Literal backslashes escape first, so text that merely spells an
-        // escape sequence never renders like a real control character.
-        if c == '\\' {
-            out.push_str("\\\\");
-        } else if (c.is_control() && c != '\t') || is_bidi_control(c) {
-            out.extend(c.escape_debug());
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn is_bidi_control(c: char) -> bool {
-    matches!(
-        c,
-        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-    )
+    Ok(render_diff(&diff))
 }
 
 fn journal() -> Result<Vec<String>> {
-    let root = env::current_dir().context("read the current directory")?;
-    let mut workspace = Workspace::open(root)?;
+    let mut workspace = open_current()?;
 
     workspace
         .journal(JOURNAL_LIMIT)?
         .iter()
-        .map(|entry| {
-            let reference = match &entry.reference {
-                Some(reference) => format!("  {reference}"),
-                None => String::new(),
-            };
+        .map(render_entry)
+        .collect()
+}
+
+fn log() -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+
+    workspace
+        .log(LOG_LIMIT)?
+        .iter()
+        .map(|snapshot| {
             Ok(printable(&format!(
-                "{}  {} ({})  {}{}",
-                format_rfc3339_utc(entry.at_ms)?,
-                entry.actor_name,
-                entry.actor_kind,
-                entry.act,
-                reference
+                "{}  {}  {}",
+                snapshot.id,
+                snapshot.actor,
+                format_rfc3339_utc(snapshot.at_ms)?
             )))
         })
         .collect()
+}
+
+fn sessions() -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let sessions = workspace.sessions()?;
+
+    if sessions.is_empty() {
+        return Ok(vec!["no sessions".to_owned()]);
+    }
+
+    Ok(sessions
+        .iter()
+        .map(|session| {
+            printable(&format!(
+                "{}  {}  {} ({})  {}",
+                session.id,
+                session.state,
+                session.actor.name,
+                session.actor.kind,
+                session.change_id
+            ))
+        })
+        .collect())
+}
+
+fn requests() -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let requests = workspace.landing_requests()?;
+
+    if requests.is_empty() {
+        return Ok(vec!["no landing requests".to_owned()]);
+    }
+
+    Ok(requests
+        .iter()
+        .map(|request| {
+            printable(&format!(
+                "{}  {}  session {}  by {} ({})",
+                request.id,
+                request.state,
+                request.session_id,
+                request.requester.name,
+                request.requester.kind
+            ))
+        })
+        .collect())
+}
+
+fn approve(request: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: RequestId = request.parse()?;
+    let approver = workspace.actor().clone();
+    let outcome = workspace.approve(id, &approver)?;
+    Ok(vec![render_outcome(&outcome)])
+}
+
+fn reject(request: &str, reason: Option<&str>) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: RequestId = request.parse()?;
+    let actor = workspace.actor().clone();
+    let rejected = workspace.reject(id, &actor, reason)?;
+    Ok(vec![format!("rejected {}", rejected.id)])
+}
+
+fn serve(mcp_stdio: bool) -> Result<Vec<String>> {
+    if !mcp_stdio {
+        bail!("ws serve requires --mcp-stdio; the HTTP transports arrive in a later slice");
+    }
+    let root = env::current_dir().context("read the current directory")?;
+    atelier_surface::serve_stdio(&root)?;
+    Ok(Vec::new())
+}
+
+fn render_outcome(outcome: &GateOutcome) -> String {
+    match outcome {
+        GateOutcome::Landed { snapshot } => format!("landed {snapshot}"),
+        GateOutcome::Pending { request, required } => format!(
+            "pending: {} of {required} approvals on {}",
+            request.approvals.len(),
+            request.id
+        ),
+        GateOutcome::Parked { request } => format!(
+            "parked {}: the change conflicts with the shared line; a new snapshot re-opens the gate",
+            request.id
+        ),
+    }
+}
+
+/// One journal line: time, actor, act, then whatever the act carries —
+/// its session, the instruction summary in quotes with its run reference,
+/// and the act's reference.
+fn render_entry(entry: &JournalEntry) -> Result<String> {
+    let mut parts = vec![
+        format_rfc3339_utc(entry.at_ms)?,
+        format!("{} ({})", entry.actor_name, entry.actor_kind),
+        entry.act.to_string(),
+    ];
+    if let Some(session) = &entry.session {
+        parts.push(session.clone());
+    }
+    if let Some(summary) = &entry.instruction_summary {
+        parts.push(format!("\"{summary}\""));
+    }
+    if let Some(run_ref) = &entry.instruction_run_ref {
+        parts.push(run_ref.clone());
+    }
+    if let Some(reference) = &entry.reference {
+        parts.push(reference.clone());
+    }
+    Ok(printable(&parts.join("  ")))
+}
+
+fn open_current() -> Result<Workspace> {
+    let root = env::current_dir().context("read the current directory")?;
+    Ok(Workspace::open(root)?)
 }
 
 fn workspace_name(path: &Path) -> String {
     match path.file_name().and_then(|name| name.to_str()) {
         Some(name) => name.to_owned(),
         None => "workspace".to_owned(),
-    }
-}
-
-fn delta_label(kind: DeltaKind) -> &'static str {
-    match kind {
-        DeltaKind::Added => "A",
-        DeltaKind::Removed => "D",
-        DeltaKind::Changed | DeltaKind::Moved => "M",
     }
 }
 
@@ -171,9 +259,7 @@ fn format_rfc3339_utc(at_ms: i64) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use atelier_core::{Address, Delta, DeltaKind, Fidelity};
-
-    use super::{format_rfc3339_utc, printable, render_delta};
+    use super::format_rfc3339_utc;
 
     #[test]
     fn formats_epoch_and_leap_day_as_utc() {
@@ -182,46 +268,5 @@ mod tests {
             format_rfc3339_utc(951_782_400_000).unwrap(),
             "2000-02-29T00:00:00Z"
         );
-    }
-
-    #[test]
-    fn delta_addresses_print_escaped_like_line_contents() {
-        let delta = Delta {
-            address: Address::new("x\n+forged.txt\u{1b}[31m"),
-            kind: DeltaKind::Changed,
-            fidelity: Fidelity::Binary,
-            before: Some("id1".to_owned()),
-            after: Some("id2".to_owned()),
-            lines: Vec::new(),
-            package: None,
-        };
-
-        assert_eq!(
-            render_delta(&delta),
-            vec!["M x\\n+forged.txt\\u{1b}[31m".to_owned()]
-        );
-    }
-
-    #[test]
-    fn literal_backslashes_escape_so_spelled_escapes_stay_distinct() {
-        assert_eq!(printable("literal \\n"), "literal \\\\n");
-        assert_eq!(printable("actual \n"), "actual \\n");
-        assert_ne!(printable("literal \\n"), printable("actual \n"));
-    }
-
-    #[test]
-    fn bidi_formatting_characters_print_escaped() {
-        assert_eq!(printable("user\u{202e}txt.exe"), "user\\u{202e}txt.exe");
-        assert_eq!(printable("a\u{2066}b\u{2069}c"), "a\\u{2066}b\\u{2069}c");
-    }
-
-    #[test]
-    fn control_characters_print_escaped_but_tabs_stay_literal() {
-        assert_eq!(
-            printable("red \u{1b}[31mnow\r\u{8}"),
-            "red \\u{1b}[31mnow\\r\\u{8}"
-        );
-        assert_eq!(printable("a\tb"), "a\tb");
-        assert_eq!(printable("plain text"), "plain text");
     }
 }

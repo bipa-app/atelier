@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 atelier-core = { path = "../core" }
+atelier-surface = { path = "../surface" }
 clap.workspace = true
 time.workspace = true
 tracing-subscriber.workspace = true
@@ -22,5 +23,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 zip.workspace = true
