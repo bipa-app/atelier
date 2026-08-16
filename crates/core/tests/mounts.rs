@@ -489,6 +489,22 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
         atelier_core::SessionState::Open
     );
 
+    // The landed line's bookmark moved; the parked line has none to move.
+    let rev_parse = |dir: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "refs/heads/atelier"])
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+    };
+    let aa_landing = landings[1].snapshot.clone();
+    assert_eq!(rev_parse(&root.path().join("aa")), Some(aa_landing.clone()));
+    assert_eq!(rev_parse(&root.path().join("bb")), None);
+
     // Resolve bb in the session: concede the contested line to the human
     // (revert the session's b.txt edit to its base) and carry the work as
     // a fresh file. The new snapshot re-opens the gate; the retry lands
@@ -674,5 +690,83 @@ fn the_manifest_orients_an_arriving_actor() {
             path = source.path.display(),
             session_id = session.id,
         )
+    );
+}
+
+#[test]
+fn a_landing_moves_the_branch_a_plain_push_carries() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    let pre_attach = git_repo(repo.path());
+    ws.attach_mount(repo.path(), "sdk").unwrap();
+
+    let git = |dir: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("git output is utf-8")
+            .trim()
+            .to_owned()
+    };
+    let sdk = root.path().join("sdk");
+
+    let actor = atelier_core::Actor {
+        name: "scribe".to_owned(),
+        kind: atelier_core::ActorKind::Agent,
+    };
+    let instruction = atelier_core::Instruction {
+        summary: "ship the landed line".to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = ws.open_session(&actor, &instruction).unwrap();
+    ws.session_write(session.id, "sdk/lib.rs", "pub fn lib() { push() }\n")
+        .unwrap();
+
+    // A session snapshot moves no branch: the adopted branch still names
+    // the pre-attach tip.
+    assert_eq!(
+        git(&sdk, &["rev-parse", "refs/heads/master"]),
+        pre_attach[1]
+    );
+
+    let outcome = ws.land(session.id).unwrap();
+    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+        panic!("the land must land, got {outcome:?}");
+    };
+    let root_landing = &landings[0];
+    let sdk_landing = &landings[1];
+    assert_eq!(sdk_landing.source.as_deref(), Some("sdk"));
+
+    // The adopted branch moved to the landed snapshot; the root landed on
+    // the fallback bookmark.
+    assert_eq!(
+        git(&sdk, &["rev-parse", "refs/heads/master"]),
+        sdk_landing.snapshot
+    );
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/atelier"]),
+        root_landing.snapshot
+    );
+
+    // Plain git push from the mount publishes the shared line.
+    let bare = tempfile::tempdir().unwrap();
+    git(bare.path(), &["init", "-q", "--bare", "-b", "master", "."]);
+    git(
+        &sdk,
+        &["push", "-q", bare.path().to_str().unwrap(), "master"],
+    );
+    assert_eq!(
+        git(bare.path(), &["rev-parse", "refs/heads/master"]),
+        sdk_landing.snapshot
     );
 }

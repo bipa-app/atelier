@@ -3,10 +3,9 @@
 atelier is adopted when agents *work inside a workspace* — not beside one. `attach`
 copies; sync-back is a later slice. So the workspace is the working location: attach
 your project as a mount (a git repo is adopted with its history and stays a real
-repo), work through sessions, land through the gate. Branch motion on landing — so
-plain `git push` from a mount carries the newest shared line — is tracked as
-ENG-9795; until it lands, the newest landing rides the colocated working-copy
-commit and a push publishes only the history beneath it.
+repo), work through sessions, land through the gate. Every landing moves the
+adopted branch (or the `atelier` bookmark), so plain `git push` from a mount
+publishes the newest shared line.
 
 Every harness below needs the same three things:
 

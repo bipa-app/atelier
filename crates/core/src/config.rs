@@ -116,6 +116,11 @@ pub struct Source {
     pub path: PathBuf,
     pub sync: SyncPolicy,
     pub mount: String,
+    /// The git branch adoption found checked out; every landing on this
+    /// source moves it, so plain `git push` carries the shared line.
+    /// Absent for folder sources and detached-HEAD adoptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// The mount value of a v1 root import.
