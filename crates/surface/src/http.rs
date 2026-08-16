@@ -10,7 +10,9 @@ use crate::mcp::{ToolFailure, dispatch, handle_message};
 
 /// The most an HTTP request body may carry. Requests hold file content and
 /// JSON-RPC messages; anything past this is not a workspace operation.
-const MAX_BODY_SIZE: usize = 8 * 1024 * 1024;
+const BODY_SIZE_MAX: usize = 8 * 1024 * 1024;
+// A full read window always fits in one response body.
+const _: () = assert!(atelier_core::READ_WINDOW_MAX <= BODY_SIZE_MAX);
 
 /// Serve the workspace at `root` over HTTP: MCP streamable HTTP at
 /// `/mcp`, the same verbs as plain REST under `/v1` — one dispatch,
@@ -99,16 +101,16 @@ fn reply(
 
 fn body(request: &mut Request) -> Result<String, Response<std::io::Cursor<Vec<u8>>>> {
     let mut body = String::new();
-    let mut reader = request.as_reader().take(MAX_BODY_SIZE as u64 + 1);
+    let mut reader = request.as_reader().take(BODY_SIZE_MAX as u64 + 1);
     if reader.read_to_string(&mut body).is_err() {
         return Err(Response::from_string(
             json!({"error": "the request body is not utf-8"}).to_string(),
         )
         .with_status_code(400));
     }
-    if body.len() > MAX_BODY_SIZE {
+    if body.len() > BODY_SIZE_MAX {
         return Err(Response::from_string(
-            json!({"error": format!("the request body exceeds {MAX_BODY_SIZE} bytes")}).to_string(),
+            json!({"error": format!("the request body exceeds {BODY_SIZE_MAX} bytes")}).to_string(),
         )
         .with_status_code(413));
     }

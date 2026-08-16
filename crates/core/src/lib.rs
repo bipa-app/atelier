@@ -24,7 +24,7 @@ pub use config::{
 pub use error::Error;
 pub use journal::{Act, JournalEntry};
 pub use landing::{Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState};
-pub use read::{MAX_READ_WINDOW, ReadResult, ReadWindow};
+pub use read::{READ_WINDOW_MAX, ReadResult, ReadWindow};
 pub use render::{printable, render_diff};
 pub use session::{Instruction, Session, SessionId, SessionState, SourceChange};
 pub use watch::{WatchEvent, WatchStop};

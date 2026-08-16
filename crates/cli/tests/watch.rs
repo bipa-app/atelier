@@ -1,3 +1,6 @@
+//! `atelier watch` as a process: external edits become attributed
+//! snapshots after the debounce, and a restart catches up cleanly.
+
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

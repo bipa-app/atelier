@@ -1,3 +1,11 @@
+//! The agent surface end to end, driven exactly as an MCP stdio client
+//! drives it: tools/list, the session loop through the gate, and journal
+//! attribution — plus the manifest/status parity between MCP and the CLI.
+#![expect(
+    clippy::too_many_lines,
+    reason = "a test tells one story end to end; fragmenting it would hide the transition being pinned"
+)]
+
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::Path;
@@ -165,22 +173,24 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool has a name"))
         .collect();
+    // Ordered for the arriving agent: read models first, then the session
+    // verbs, then the gate's.
     assert_eq!(
         names,
         [
             "manifest",
             "status",
-            "open_session",
             "read",
-            "write",
             "diff",
-            "request_land",
-            "approve",
-            "reject",
-            "land",
             "landing_requests",
             "journal",
-            "abandon"
+            "open_session",
+            "write",
+            "land",
+            "abandon",
+            "request_land",
+            "approve",
+            "reject"
         ]
     );
 

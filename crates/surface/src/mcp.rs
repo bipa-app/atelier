@@ -117,16 +117,7 @@ pub(crate) fn dispatch(
         "manifest" => Ok(json!({"manifest": workspace.manifest()?})),
         "status" => Ok(json!({"status": workspace.status()?})),
         "open_session" => {
-            let actor = Actor {
-                name: required_str(args, "actor_name")?.to_owned(),
-                kind: actor_kind(required_str(args, "actor_kind")?)?,
-            };
-            let instruction = Instruction {
-                summary: required_str(args, "instruction_summary")?.to_owned(),
-                run_ref: optional_str(args, "instruction_run_ref")?.map(str::to_owned),
-                verbatim: optional_str(args, "instruction_verbatim")?.map(str::to_owned),
-            };
-            let session = workspace.open_session(&actor, &instruction)?;
+            let session = workspace.open_session(&named_actor(args)?, &instruction_args(args)?)?;
             Ok(json!({
                 "session_id": session.id.to_string(),
                 "working_copy": session.working_copy.display().to_string(),
@@ -139,16 +130,7 @@ pub(crate) fn dispatch(
             let start = optional_usize(args, "start")?.unwrap_or_default();
             let result =
                 workspace.session_read(id, path, start, optional_usize(args, "max_bytes")?)?;
-            Ok(json!({
-                "content": result.content,
-                "window": {
-                    "start": result.window.start,
-                    "end": result.window.end,
-                    "total": result.window.total,
-                },
-                "next": result.next,
-                "projected_by": result.projected_by.map(|package| package.to_string()),
-            }))
+            Ok(read_json(&result))
         }
         "write" => {
             let id = session_id(args)?;
@@ -186,10 +168,7 @@ pub(crate) fn dispatch(
             Ok(json!({"requests": requests}))
         }
         "journal" => {
-            let limit = match optional_usize(args, "limit")? {
-                Some(limit) => limit,
-                None => JOURNAL_LIMIT,
-            };
+            let limit = optional_usize(args, "limit")?.unwrap_or(JOURNAL_LIMIT);
             let entries: Vec<Value> = workspace.journal(limit)?.iter().map(entry_json).collect();
             Ok(json!({"entries": entries}))
         }
@@ -204,14 +183,44 @@ pub(crate) fn dispatch(
     }
 }
 
+/// The typed actor a call names on the wire — the parse boundary for
+/// `actor_name` and `actor_kind` (AGENTS.md: parse, don't validate).
+fn named_actor(args: &Value) -> Result<Actor, ToolFailure> {
+    Ok(Actor {
+        name: required_str(args, "actor_name")?.to_owned(),
+        kind: actor_kind(required_str(args, "actor_kind")?)?,
+    })
+}
+
+/// The typed instruction a call carries — summary required, run
+/// reference and verbatim body optional (ADR-0004 decides what persists).
+fn instruction_args(args: &Value) -> Result<Instruction, ToolFailure> {
+    Ok(Instruction {
+        summary: required_str(args, "instruction_summary")?.to_owned(),
+        run_ref: optional_str(args, "instruction_run_ref")?.map(str::to_owned),
+        verbatim: optional_str(args, "instruction_verbatim")?.map(str::to_owned),
+    })
+}
+
+/// A windowed read as the wire carries it: content, window, continuation.
+fn read_json(result: &atelier_core::ReadResult) -> Value {
+    json!({
+        "content": result.content,
+        "window": {
+            "start": result.window.start,
+            "end": result.window.end,
+            "total": result.window.total,
+        },
+        "next": result.next,
+        "projected_by": result.projected_by.map(|package| package.to_string()),
+    })
+}
+
 /// The actor a call acts as: the named one when the call carries an
 /// identity, else the actor this server is configured as.
 fn calling_actor(workspace: &Workspace, args: &Value) -> Result<Actor, ToolFailure> {
     match optional_str(args, "actor_name")? {
-        Some(name) => Ok(Actor {
-            name: name.to_owned(),
-            kind: actor_kind(required_str(args, "actor_kind")?)?,
-        }),
+        Some(_) => named_actor(args),
         None => Ok(workspace.actor().clone()),
     }
 }
@@ -350,19 +359,72 @@ fn error_response(id: &Value, code: i64, message: &str) -> String {
 
 /// The tool surface, spoken in the glossary: session, change, land,
 /// journal — never the engine's vocabulary.
+/// The tool surface, spoken in the glossary: session, change, land,
+/// journal — never the engine's vocabulary. Ordered for the arriving
+/// agent: read models first, then the session verbs, then the gate's.
 fn tool_definitions() -> Value {
-    json!([
-        {
+    let mut tools = read_model_tools();
+    tools.extend(session_tools());
+    tools.extend(gate_tools());
+    Value::Array(tools)
+}
+
+/// The read models: what an actor consults before and while it works.
+fn read_model_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "manifest",
             "description": "Read this first: what this workspace is - its sources and mounts, its landing discipline, its live state, and the loop it expects you to follow.",
             "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
+        }),
+        json!({
             "name": "status",
             "description": "The live state: per-source heads, open sessions, live requests.",
             "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
+        }),
+        json!({
+            "name": "read",
+            "description": "Read a file in the session's working copy, windowed. Documents with a format package read as their text projection; the response carries a continuation offset when more remains.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "path": {"type": "string"},
+                    "start": {"type": "integer", "description": "Byte offset to start from; use the last response's next"},
+                    "max_bytes": {"type": "integer", "description": "Window size, at most 50000"}
+                },
+                "required": ["session_id", "path"]
+            }
+        }),
+        json!({
+            "name": "diff",
+            "description": "The session's change against the shared-line snapshot it forked from, rendered at the highest fidelity available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "required": ["session_id"]
+            }
+        }),
+        json!({
+            "name": "landing_requests",
+            "description": "Every landing request, newest first, with its gate state and approvals.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
+            "name": "journal",
+            "description": "The workspace's record of acts: who did what, in which session, on whose instruction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}}
+            }
+        }),
+    ]
+}
+
+/// The session verbs: a working copy and a change of one's own.
+fn session_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "open_session",
             "description": "Open a session: your own working copy of the workspace and your own change. Edit files under working_copy (or with write), then diff and request_land.",
             "inputSchema": {
@@ -376,22 +438,8 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["actor_name", "actor_kind", "instruction_summary"]
             }
-        },
-        {
-            "name": "read",
-            "description": "Read a file in the session's working copy, windowed. Documents with a format package read as their text projection; the response carries a continuation offset when more remains.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string"},
-                    "path": {"type": "string"},
-                    "start": {"type": "integer", "description": "Byte offset to start from; use the last response's next"},
-                    "max_bytes": {"type": "integer", "description": "Window size, at most 50000"}
-                },
-                "required": ["session_id", "path"]
-            }
-        },
-        {
+        }),
+        json!({
             "name": "write",
             "description": "Write a file in the session's working copy and snapshot the change.",
             "inputSchema": {
@@ -403,17 +451,32 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["session_id", "path", "content"]
             }
-        },
-        {
-            "name": "diff",
-            "description": "The session's change against the shared-line snapshot it forked from, rendered at the highest fidelity available.",
+        }),
+        json!({
+            "name": "land",
+            "description": "Land the session's change: request plus self-approval where policy allows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"session_id": {"type": "string"}},
                 "required": ["session_id"]
             }
-        },
-        {
+        }),
+        json!({
+            "name": "abandon",
+            "description": "Close the session without landing; its work stays in history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "required": ["session_id"]
+            }
+        }),
+    ]
+}
+
+/// The gate verbs: how a change asks to land and who lets it.
+fn gate_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "request_land",
             "description": "Open the session's landing request. The change lands once the request's gate is satisfied; landing is never a direct write.",
             "inputSchema": {
@@ -421,8 +484,8 @@ fn tool_definitions() -> Value {
                 "properties": {"session_id": {"type": "string"}},
                 "required": ["session_id"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "approve",
             "description": "Approve a landing request. When the gate is satisfied the change lands (or the request parks on a conflict).",
             "inputSchema": {
@@ -434,8 +497,8 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["request_id"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "reject",
             "description": "Reject a landing request; the session stays open.",
             "inputSchema": {
@@ -448,37 +511,6 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["request_id"]
             }
-        },
-        {
-            "name": "land",
-            "description": "Land the session's change: request plus self-approval where policy allows.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"session_id": {"type": "string"}},
-                "required": ["session_id"]
-            }
-        },
-        {
-            "name": "landing_requests",
-            "description": "Every landing request, newest first, with its gate state and approvals.",
-            "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "journal",
-            "description": "The workspace's record of acts: who did what, in which session, on whose instruction.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"limit": {"type": "integer"}}
-            }
-        },
-        {
-            "name": "abandon",
-            "description": "Close the session without landing; its work stays in history.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"session_id": {"type": "string"}},
-                "required": ["session_id"]
-            }
-        }
-    ])
+        }),
+    ]
 }
