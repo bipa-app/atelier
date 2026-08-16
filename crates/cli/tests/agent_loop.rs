@@ -21,7 +21,7 @@ fn write_actor_config(config_home: &Path) {
 }
 
 fn ws(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
+    let mut command = Command::cargo_bin("atelier").expect("atelier binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -43,7 +43,7 @@ fn assert_line_matches(line: &str, pattern: &str) {
     assert!(matched, "line {line:?} does not match {pattern:?}");
 }
 
-/// A scripted MCP client: the `ws serve --mcp-stdio` child on the other
+/// A scripted MCP client: the `atelier serve --mcp-stdio` child on the other
 /// end of a pipe, spoken to one JSON-RPC line at a time.
 struct McpClient {
     child: Child,
@@ -54,7 +54,7 @@ struct McpClient {
 
 impl McpClient {
     fn start(config_home: &Path, workspace: &Path, env: &[(&str, &str)]) -> Self {
-        let mut command = StdCommand::new(env!("CARGO_BIN_EXE_ws"));
+        let mut command = StdCommand::new(env!("CARGO_BIN_EXE_atelier"));
         command
             .args(["serve", "--mcp-stdio"])
             .current_dir(workspace)
@@ -64,7 +64,7 @@ impl McpClient {
         for (key, value) in env {
             command.env(key, value);
         }
-        let mut child = command.spawn().expect("spawn ws serve --mcp-stdio");
+        let mut child = command.spawn().expect("spawn atelier serve --mcp-stdio");
         let stdin = child.stdin.take().expect("child stdin is piped");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout is piped"));
         let mut client = Self {
@@ -228,7 +228,7 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
 
     // The change is on the shared line, attributed to the agent.
     let log = ws(config_home.path(), workspace.path())
-        .arg("log")
+        .arg("history")
         .assert()
         .success();
     assert_line_matches(
@@ -513,7 +513,7 @@ fn concurrent_applies_share_one_lease_across_processes() {
     // No corruption, no lost snapshot: both changes sit on the shared
     // line in landing order, and both files carry their content.
     let log = ws(config_home.path(), workspace.path())
-        .arg("log")
+        .arg("history")
         .assert()
         .success();
     let lines = stdout_lines(&log);
@@ -527,4 +527,58 @@ fn concurrent_applies_share_one_lease_across_processes() {
         fs::read_to_string(workspace.path().join("b.txt")).expect("read b.txt"),
         "from s2\n"
     );
+}
+
+#[test]
+fn the_land_verb_lands_a_session_through_the_gate() {
+    let config_home = TempDir::new().unwrap();
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().unwrap();
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut client = McpClient::start(config_home.path(), workspace.path(), &[]);
+    let session = client.call(
+        "open_session",
+        &json!({
+            "actor_name": "verb-agent", "actor_kind": "agent",
+            "instruction_summary": "land through the human face",
+        }),
+    );
+    assert_eq!(session["session_id"], "s1");
+    client.call(
+        "write",
+        &json!({"session_id": "s1", "path": "plan.md", "content": "draft\n"}),
+    );
+    drop(client);
+
+    // The human face lands the session: the same gate, the same outcome
+    // wording the MCP land tool reports.
+    let landed = ws(config_home.path(), workspace.path())
+        .args(["land", "s1"])
+        .assert()
+        .success();
+    let lines = stdout_lines(&landed);
+    assert_eq!(lines.len(), 1);
+    assert_line_matches(&lines[0], &format!("^landed {SNAPSHOT_ID}$"));
+    let snapshot = lines[0]["landed ".len()..].to_owned();
+
+    let history = ws(config_home.path(), workspace.path())
+        .arg("history")
+        .assert()
+        .success();
+    let head = stdout_lines(&history).remove(0);
+    assert!(
+        head.starts_with(&snapshot) && head.contains("verb-agent"),
+        "unexpected head: {head:?}"
+    );
+
+    // Landing twice refuses by name: the session is closed.
+    ws(config_home.path(), workspace.path())
+        .args(["land", "s1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("session s1 is landed"));
 }

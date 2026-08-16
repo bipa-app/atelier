@@ -7,20 +7,20 @@ atelier answers "what is a workspace in the age of agents": a named, versioned b
 - **Everything is versioned.** No unversioned state; every edit becomes a snapshot. Jujutsu's model is the engine, git is the boundary — every workspace is a real git repo you can clone, pull, and push.
 - **Documents diff like code.** One diff library, a fidelity ladder (binary → projected text → rich), and format support shipped as packages. First package: docx → markdown.
 - **Actions are recorded.** History records content states; the journal records acts and intent — who, in which session, on whose instruction, with what approval.
-- **Agents are first-class.** Sessions, working copies, leases, landing, and a manifest, exposed over MCP and the `ws` CLI.
+- **Agents are first-class.** Sessions, working copies, leases, landing, and a manifest, exposed over MCP and the `atelier` CLI.
 
 Status: pre-alpha, under active design.
 
 ## Quickstart
 
-Build the `ws` binary (the toolchain is pinned in `rust-toolchain.toml`):
+Build the `atelier` binary (the toolchain is pinned in `rust-toolchain.toml`):
 
 ```sh
 git clone https://github.com/bipa-app/atelier
 cargo install --path atelier/crates/cli
 ```
 
-Tell atelier who you are, then work in a fresh directory. Every `ws` command snapshots outstanding edits first — there is no save step:
+Tell atelier who you are, then work in a fresh directory. Every `atelier` command snapshots outstanding edits first — there is no save step:
 
 ```sh
 mkdir -p ~/.config/atelier
@@ -31,21 +31,21 @@ kind = "human"
 EOF
 
 mkdir demo && cd demo
-ws init
+atelier init
 echo "atelier keeps every edit" > notes.txt
-ws journal
+atelier journal
 echo "no save button, no lost work" >> notes.txt
-ws diff
+atelier diff
 ```
 
 The journal names who did what and when; the diff reads at the highest fidelity the format allows — a changed .docx prints a markdown line diff, never "binary files differ".
 
 From there:
 
-- `ws watch` — external edits (Finder, any editor) become attributed snapshots within seconds.
-- `ws attach <folder>` — bind an existing folder as the workspace's source.
-- `ws serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
-- `ws sessions` / `ws requests` / `ws approve <id>` — review and land an agent's change.
+- `atelier watch` — external edits (Finder, any editor) become attributed snapshots within seconds.
+- `atelier attach <folder>` — bind an existing folder as the workspace's source.
+- `atelier serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
+- `atelier sessions` / `atelier requests` / `atelier approve <id>` — review and land an agent's change.
 
 ## Contributing
 

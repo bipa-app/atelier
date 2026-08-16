@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn command(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
+    let mut command = Command::cargo_bin("atelier").expect("atelier binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -23,7 +23,7 @@ fn write_actor_config(config_home: &Path) {
     .expect("write actor config");
 }
 
-/// The path a `ws` process run in `dir` reports: its canonicalized cwd.
+/// The path a `atelier` process run in `dir` reports: its canonicalized cwd.
 fn canonical(dir: &Path) -> PathBuf {
     fs::canonicalize(dir).expect("canonicalize test dir")
 }

@@ -4,15 +4,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use atelier_core::{
-    GateOutcome, JournalEntry, RequestId, WatchEvent, WatchStop, Workspace, printable, render_diff,
+    GateOutcome, JournalEntry, RequestId, SessionId, WatchEvent, WatchStop, Workspace, printable,
+    render_diff,
 };
 use clap::{Parser, Subcommand};
 
 const JOURNAL_LIMIT: usize = 100;
-const LOG_LIMIT: usize = 100;
+const HISTORY_LIMIT: usize = 100;
 
 #[derive(Debug, Parser)]
-#[command(name = "ws", about = "Versioned workspaces for humans and agents")]
+#[command(name = "atelier", about = "Versioned workspaces for humans and agents")]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -28,8 +29,9 @@ enum Command {
     Diff,
     /// Show recent workspace acts.
     Journal,
-    /// Show the shared line's snapshots, newest first.
-    Log,
+    /// Show the shared line's snapshots, newest first. History records
+    /// content states; the journal records acts and intent.
+    History,
     /// Show every session, newest first.
     Sessions,
     /// Show every landing request, newest first.
@@ -42,6 +44,9 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Land the session's change: request plus self-approval where
+    /// policy allows; otherwise the request stays pending for approvers.
+    Land { session: String },
     /// Watch the workspace: external edits become attributed snapshots.
     Watch {
         /// Quiet time after an edit storm before its snapshot, in milliseconds.
@@ -72,11 +77,12 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Attach { folder } => attach(&folder),
         Command::Diff => diff(),
         Command::Journal => journal(),
-        Command::Log => log(),
+        Command::History => history(),
         Command::Sessions => sessions(),
         Command::Requests => requests(),
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
+        Command::Land { session } => land(&session),
         Command::Watch { debounce_ms } => watch(debounce_ms),
         Command::Serve {
             mcp_stdio,
@@ -136,11 +142,11 @@ fn journal() -> Result<Vec<String>> {
         .collect()
 }
 
-fn log() -> Result<Vec<String>> {
+fn history() -> Result<Vec<String>> {
     let mut workspace = open_current()?;
 
     workspace
-        .log(LOG_LIMIT)?
+        .log(HISTORY_LIMIT)?
         .iter()
         .map(|snapshot| {
             Ok(printable(&format!(
@@ -215,6 +221,13 @@ fn reject(request: &str, reason: Option<&str>) -> Result<Vec<String>> {
     Ok(vec![format!("rejected {}", rejected.id)])
 }
 
+fn land(session: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: SessionId = session.parse()?;
+    let outcome = workspace.land(id)?;
+    Ok(vec![render_outcome(&outcome)])
+}
+
 /// Blocks until the process is interrupted, printing each act as it
 /// happens; Rust's stdout is line-buffered, so every line lands as soon
 /// as it prints — a reader on the other end of a pipe sees acts live.
@@ -239,8 +252,10 @@ fn serve(mcp_stdio: bool, http: bool, bind: &str, allow_remote: bool) -> Result<
     match (mcp_stdio, http) {
         (true, false) => atelier_surface::serve_stdio(&root)?,
         (false, true) => atelier_surface::serve_http(&root, bind, allow_remote)?,
-        (true, true) => bail!("ws serve speaks one transport per process: --mcp-stdio or --http"),
-        (false, false) => bail!("ws serve requires a transport: --mcp-stdio or --http"),
+        (true, true) => {
+            bail!("atelier serve speaks one transport per process: --mcp-stdio or --http")
+        }
+        (false, false) => bail!("atelier serve requires a transport: --mcp-stdio or --http"),
     }
     Ok(Vec::new())
 }

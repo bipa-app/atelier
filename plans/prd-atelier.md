@@ -9,7 +9,7 @@ Every team building with agents hand-rolls the same thing: a place for agents to
 
 ## Solution
 
-An open-source toolkit — a Rust SDK, an MCP/HTTP server, and the `ws` CLI, all thin faces over one core library — where a workspace is a named, versioned body of any work content, shared by humans and agents through the same contracts:
+An open-source toolkit — a Rust SDK, an MCP/HTTP server, and the `atelier` CLI, all thin faces over one core library — where a workspace is a named, versioned body of any work content, shared by humans and agents through the same contracts:
 
 - Attach a workspace to a source — remote git repo, local git repo, local folder, remote folder — with explicit sync policy.
 - Every edit auto-snapshots (jj engine on the git boundary): nothing unversioned, everything undoable, every workspace a real git repo.
@@ -42,7 +42,7 @@ An open-source toolkit — a Rust SDK, an MCP/HTTP server, and the `ws` CLI, all
 - Diffing: one `diff-core` library owning the Diff/Delta model and the fidelity ladder; `FormatPackage` trait (projector mandatory, differ optional); packages as independent crates (ADR-0003). Projections are derived and cached by (blob, package, version), never committed.
 - Journal: append-only; instruction as summary + run reference by default, verbatim per profile (ADR-0004).
 - Concurrency: editing never leases; landing always does. Optimistic by default; pessimistic paths per profile policy.
-- Crates (all `publish = false`; crates.io names `atelier`/`atelier_core` are taken — publish prefix decided later): `core`, `diff-core`, `format-docx`, `surface` (MCP + HTTP), `cli` (binary `ws`).
+- Crates (all `publish = false`; crates.io names `atelier`/`atelier_core` are taken — publish prefix decided later): `core`, `diff-core`, `format-docx`, `surface` (MCP + HTTP), `cli` (binary `atelier`).
 - Delivery surfaces: one core, three faces — SDK first; CLI, MCP (stdio in v1, streamable HTTP after), and REST are thin shells with no shell-only behavior (ADR-0006).
 - Storage: content = git object store via jj (ADR-0002); journal = SQLite beside the repo, never inside it (ADR-0005); projections = derived, content-addressed, evictable cache.
 - Rust throughout; anyhow for errors, tracing for logs; Rust 2018+ module layout (no mod.rs).

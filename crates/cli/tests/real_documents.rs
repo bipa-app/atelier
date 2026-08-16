@@ -27,7 +27,7 @@ fn fixtures() -> PathBuf {
 }
 
 fn command(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
+    let mut command = Command::cargo_bin("atelier").expect("atelier binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);

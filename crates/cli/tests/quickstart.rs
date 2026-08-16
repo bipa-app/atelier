@@ -59,12 +59,12 @@ fn the_readme_quickstart_runs_end_to_end_in_a_temp_dir() {
     let session = &blocks[1];
 
     // A stranger's machine: an empty home, a fresh working directory, and
-    // `ws` on PATH — the one substitution for the `cargo install` block.
+    // `atelier` on PATH — the one substitution for the `cargo install` block.
     let home = TempDir::new().expect("create home tempdir");
     let cwd = TempDir::new().expect("create working tempdir");
-    let ws_dir = Path::new(env!("CARGO_BIN_EXE_ws"))
+    let ws_dir = Path::new(env!("CARGO_BIN_EXE_atelier"))
         .parent()
-        .expect("ws binary has a parent dir");
+        .expect("atelier binary has a parent dir");
     let path = format!(
         "{}:{}",
         ws_dir.display(),
