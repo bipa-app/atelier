@@ -7,6 +7,7 @@ use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::default_backend_factories::{
     default_backend_factories, default_working_copy_factories, default_working_copy_factory,
 };
+use jj_lib::git::{self, GitImportOptions};
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merged_tree::MergedTree;
@@ -138,6 +139,82 @@ impl Engine {
         Ok(())
     }
 
+    /// Adopt the git repository already at `root`: jj on the existing git
+    /// store, its history preserved, HEAD's tree checked out as the
+    /// working copy's parent — the repo stays a real repo plain git
+    /// pushes (ADR-0009: adopt, never import).
+    pub fn adopt_git(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
+        block_on(Self::adopt_git_async(root, actor, boundary))
+    }
+
+    async fn adopt_git_async(
+        root: &Path,
+        actor: &Actor,
+        boundary: &[String],
+    ) -> Result<Self, Error> {
+        let settings = build_settings(actor)?;
+        let (mut ws, repo) = JjWorkspace::init_external_git(&settings, root, &root.join(".git"))
+            .await
+            .map_err(engine_err)?;
+        let mut tx = repo.start_transaction();
+        git::import_head(tx.repo_mut()).await.map_err(engine_err)?;
+        let options = GitImportOptions {
+            abandon_unreachable_commits: false,
+            record_synthetic_predecessors: false,
+            remote_auto_track_bookmarks: std::collections::HashMap::new(),
+        };
+        git::import_refs(tx.repo_mut(), &options)
+            .await
+            .map_err(engine_err)?;
+        let head = tx.repo_mut().view().git_head().as_normal().cloned();
+        let name = ws.workspace_name().to_owned();
+        let wc_commit = match head {
+            // The working copy continues the adopted history: HEAD's tree,
+            // HEAD as parent.
+            Some(head_id) => {
+                let head = tx
+                    .repo_mut()
+                    .store()
+                    .get_commit(&head_id)
+                    .map_err(engine_err)?;
+                let wc_commit = tx
+                    .repo_mut()
+                    .new_commit(vec![head_id], head.tree())
+                    .set_author(signature(actor))
+                    .write()
+                    .await
+                    .map_err(engine_err)?;
+                tx.repo_mut()
+                    .set_wc_commit(name, wc_commit.id().clone())
+                    .map_err(engine_err)?;
+                tx.repo_mut()
+                    .rebase_descendants()
+                    .await
+                    .map_err(engine_err)?;
+                Some(wc_commit)
+            }
+            // An empty repo (no commits yet) adopts as a fresh line.
+            None => None,
+        };
+        if let Some(wc_commit) = &wc_commit {
+            git::reset_head(tx.repo_mut(), wc_commit)
+                .await
+                .map_err(engine_err)?;
+        }
+        let repo = tx.commit("adopt git repo").await.map_err(engine_err)?;
+        if let Some(wc_commit) = &wc_commit {
+            ws.check_out(repo.op_id().clone(), None, wc_commit)
+                .await
+                .map_err(engine_err)?;
+        }
+        Ok(Self {
+            ws,
+            repo,
+            _settings: settings,
+            boundary: boundary.to_vec(),
+        })
+    }
+
     /// Snapshot outstanding edits. Records a new commit only when the tree
     /// changed; returns the new snapshot id in that case.
     pub fn snapshot(&mut self) -> Result<Option<String>, Error> {
@@ -219,6 +296,15 @@ impl Engine {
             .rebase_descendants()
             .await
             .map_err(engine_err)?;
+        // The Stack style moves a shared line: keep the colocated git
+        // HEAD on it, so plain git sees what jj wrote (PRD story 14). The
+        // Amend style is a session's — sessions share the root's git repo
+        // and must not steal its HEAD.
+        if let SnapshotStyle::Stack = style {
+            git::reset_head(tx.repo_mut(), &new_commit)
+                .await
+                .map_err(engine_err)?;
+        }
         let repo = tx.commit("snapshot").await.map_err(engine_err)?;
         locked
             .finish(repo.op_id().clone())
@@ -361,6 +447,10 @@ impl Engine {
             .map_err(engine_err)?;
         tx.repo_mut()
             .rebase_descendants()
+            .await
+            .map_err(engine_err)?;
+        // The line advanced; keep the colocated git HEAD on it.
+        git::reset_head(tx.repo_mut(), &rebased)
             .await
             .map_err(engine_err)?;
         let repo = tx.commit("land").await.map_err(engine_err)?;
