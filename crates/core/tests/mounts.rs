@@ -609,3 +609,70 @@ fn watch_routes_external_edits_into_the_owning_history() {
         "no mounted snapshot act: {entries:#?}"
     );
 }
+
+#[test]
+fn the_manifest_orients_an_arriving_actor() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let app = tempfile::tempdir().unwrap();
+    fs::write(app.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let source = ws.attach_mount(app.path(), "app").unwrap();
+    let actor = atelier_core::Actor {
+        name: "scribe".to_owned(),
+        kind: atelier_core::ActorKind::Agent,
+    };
+    let instruction = atelier_core::Instruction {
+        summary: "read the room".to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = ws.open_session(&actor, &instruction).unwrap();
+
+    let manifest = ws.manifest().unwrap();
+    let logs = ws.log(50).unwrap();
+    let root_head = logs
+        .iter()
+        .find(|entry| entry.source.is_none())
+        .unwrap()
+        .snapshot
+        .id
+        .clone();
+    let app_head = logs
+        .iter()
+        .find(|entry| entry.source.as_deref() == Some("app"))
+        .unwrap()
+        .snapshot
+        .id
+        .clone();
+    assert_eq!(
+        manifest,
+        format!(
+            "workspace: {name}\n\
+             schema: 1\n\
+             \n\
+             sources:\n\
+             \x20 app  local-folder  {path}  two-way\n\
+             \n\
+             discipline:\n\
+             \x20 approvals: 1  self-approval: allowed  snapshots dismiss approvals: yes\n\
+             \x20 instructions: summary\n\
+             \n\
+             state:\n\
+             \x20 head: {root_head}\n\
+             \x20 head app: {app_head}\n\
+             \x20 open sessions: {session_id}\n\
+             \x20 live requests: none\n\
+             \n\
+             the loop:\n\
+             \x20 open_session -> write -> diff -> land (or request_land + approve)\n\
+             \x20 mount-scoped paths address sources; editing never takes the landing lease",
+            name = root.path().file_name().unwrap().to_str().unwrap(),
+            path = source.path.display(),
+            session_id = session.id,
+        )
+    );
+}

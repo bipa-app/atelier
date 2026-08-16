@@ -130,8 +130,10 @@ GET  /v1/journal?limit=
 ```
 
 Statuses: 400 broken protocol · 422 domain refusal (`{"error": …}`) · 404/405 routing.
-The remaining sketch endpoints (files read, request-land/approve/reject, abandon, status +
-manifest) arrive with their read models.
+The `manifest` tool is shipped on both MCP transports — the first thing an actor
+reads: identity, sources, discipline, live state, and the loop. `atelier manifest`
+prints the identical render. The remaining sketch endpoints (files read,
+request-land/approve/reject, abandon, status as REST) arrive with their read models.
 
 Localhost bind by default (`--bind ip:port`); binding beyond loopback requires
 `--allow-remote`; auth is a dedicated pre-exposure slice.
