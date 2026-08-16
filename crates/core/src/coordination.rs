@@ -300,6 +300,19 @@ impl Coordination {
         Ok(())
     }
 
+    /// Un-record one source's landing under the request: an undo stepped
+    /// the line back, so the fact no longer holds and a re-apply must
+    /// land it anew (ADR-0011).
+    pub fn delete_landing(&self, request_id: i64, source: Option<&str>) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "DELETE FROM request_landings WHERE request_id = ?1 AND source = ?2",
+                params![request_id, source.unwrap_or(ROOT_MOUNT)],
+            )
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
     /// Record one source's landing under the request — the fact a re-apply
     /// after a park must not repeat. The root records as `/`.
     pub fn record_landing(

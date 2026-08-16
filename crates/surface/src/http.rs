@@ -264,6 +264,7 @@ fn request_route(workspace: &mut Workspace, method: &Method, rest: &str, body: &
     match (method, action) {
         (Method::Post, "approve") => json_call(workspace, "approve", &args),
         (Method::Post, "reject") => json_call(workspace, "reject", &args),
+        (Method::Post, "undo") => json_call(workspace, "undo", &args),
         _ => error_route(404, "no such resource"),
     }
 }

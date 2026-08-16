@@ -19,10 +19,14 @@ use crate::config::{
     read_workspace_config, resolve_actor, write_workspace_config,
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
-use crate::engine::{DiffSides, Engine, FileBlob, LADDER_FILE_SIZE_MAX, LandOutcome, Side};
+use crate::engine::{
+    DiffSides, Engine, FileBlob, LADDER_FILE_SIZE_MAX, LandOutcome, Side, StepBack,
+};
 use crate::error::{Error, config_err, engine_err};
 use crate::journal::{Act, Journal, JournalEntry};
-use crate::landing::{Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState};
+use crate::landing::{
+    Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState, Restore,
+};
 use crate::projection::ProjectionCache;
 use crate::read::{ReadResult, window_size, window_text};
 use crate::session::{Instruction, Session, SessionId, SessionState, SourceChange};
@@ -1055,10 +1059,159 @@ impl Workspace {
                     session.id,
                     Some(scoped(&format!("{id} {snapshot}"))),
                 )?;
-                self.sync_after_landing(session, source, approver)?;
+                self.sync_after_line_move(session, source, approver)?;
             }
         }
         Ok(outcome)
+    }
+
+    /// Step a landed request back off every line it landed (ADR-0011):
+    /// reverse landing order, each line under its landing lease,
+    /// idempotent per line. The request re-opens with its approvals
+    /// dismissed — an undo is a new decision point — and the session
+    /// re-opens with its change intact, immediately re-landable.
+    pub fn undo(&mut self, id: RequestId) -> Result<Vec<Restore>, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        let Some(row) = self.coordination.request(id.0)? else {
+            return Err(Error::RequestNotFound(id.to_string()));
+        };
+        match row.state {
+            RequestState::Landed => {}
+            RequestState::Open
+            | RequestState::Approved
+            | RequestState::Parked
+            | RequestState::Rejected
+            | RequestState::Abandoned => {
+                return Err(Error::Config(format!(
+                    "{id} is {}; only a landed request undoes - snapshots amend forward, gate acts move forward, syncs reconcile with atelier sync",
+                    row.state
+                )));
+            }
+        }
+        let session = self.session(SessionId(row.session_id))?;
+        let mut landings = self.coordination.landings(id.0)?;
+        landings.reverse();
+        let mut restores = Vec::new();
+        for (source, landed) in &landings {
+            if let Some(head) = self.undo_source(&session, id, source.as_deref(), landed)? {
+                restores.push(Restore {
+                    source: source.clone(),
+                    head,
+                });
+            }
+        }
+        if self.coordination.move_request_state(
+            id.0,
+            &[RequestState::Landed],
+            RequestState::Open,
+        )? {
+            let actor = self.actor.clone();
+            if self.coordination.dismiss_approvals(id.0)? > 0 {
+                self.append_session_entry(
+                    &actor,
+                    Act::ApprovalsDismissed,
+                    session.id,
+                    Some(id.to_string()),
+                )?;
+            }
+            let _ = self.coordination.move_session_state(
+                session.id.0,
+                SessionState::Landed,
+                SessionState::Open,
+            )?;
+        }
+        Ok(restores)
+    }
+
+    /// One line's undo under its landing lease — the same scarce point a
+    /// landing holds, so undos and applies never interleave on a line.
+    fn undo_source(
+        &mut self,
+        session: &Session,
+        id: RequestId,
+        source: Option<&str>,
+        landed: &str,
+    ) -> Result<Option<String>, Error> {
+        let point = match source {
+            Some(name) => format!("{LANDING_LEASE_POINT}/{name}"),
+            None => LANDING_LEASE_POINT.to_owned(),
+        };
+        let holder = format!("{}:{}", self.actor.name, std::process::id());
+        let now = now_ms()?;
+        match self
+            .coordination
+            .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
+        {
+            LeaseClaim::HeldByOther {
+                holder,
+                expires_at_ms,
+            } => {
+                return Err(Error::LeaseHeld {
+                    holder,
+                    expires_at_ms,
+                });
+            }
+            LeaseClaim::Held => {}
+        }
+        let outcome = self.undo_source_holding_lease(session, id, source, landed);
+        let released = self.coordination.release_lease(&point, &holder);
+        let outcome = outcome?;
+        released?;
+        Ok(outcome)
+    }
+
+    /// The step-back plus its records: the undo act and the origin
+    /// re-mirror. `None` when a prior attempt already stepped this line.
+    fn undo_source_holding_lease(
+        &mut self,
+        session: &Session,
+        id: RequestId,
+        source: Option<&str>,
+        landed: &str,
+    ) -> Result<Option<String>, Error> {
+        let step = match source {
+            None => self.engine.step_back(landed, LANDED_BOOKMARK)?,
+            Some(name) => {
+                let index = self
+                    .mounts
+                    .iter()
+                    .position(|mount| mount.name == name)
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                let bookmark = self.mounts[index]
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
+                self.mounts[index].engine.step_back(landed, &bookmark)?
+            }
+        };
+        match step {
+            StepBack::Stepped { restored } => {
+                // The landing is no longer a fact: a re-apply of this
+                // request must land the line anew, not skip it.
+                self.coordination.delete_landing(id.0, source)?;
+                let reference = match source {
+                    Some(name) => format!("{name} {id} {restored}"),
+                    None => format!("{id} {restored}"),
+                };
+                let actor = self.actor.clone();
+                self.append_session_entry(&actor, Act::Undo, session.id, Some(reference))?;
+                self.sync_after_line_move(session, source, &actor)?;
+                Ok(Some(restored))
+            }
+            StepBack::AlreadyStepped => {
+                // The step happened on a prior attempt that died before
+                // un-recording; repair the record, journal nothing more.
+                self.coordination.delete_landing(id.0, source)?;
+                Ok(None)
+            }
+            StepBack::LineMoved { head } => {
+                let line = source.unwrap_or("the root");
+                Err(Error::Config(format!(
+                    "{line} moved past {id}: {head} sits on the line now; undo that landing first"
+                )))
+            }
+        }
     }
 
     /// Mirror a folder source's shared line back to its origin (ADR-0010):
@@ -1147,10 +1300,11 @@ impl Workspace {
         Ok(SyncOutcome::Synced { snapshot })
     }
 
-    /// After a landing advanced a folder-sourced line, mirror it home. The
-    /// landing already stood: a dirty or unwritable origin parks the sync
-    /// in the journal and never fails the apply (ADR-0010).
-    fn sync_after_landing(
+    /// After a line moved — a landing advanced it or an undo stepped it
+    /// back — mirror a folder source home. The move already stood: a dirty
+    /// or unwritable origin parks the sync in the journal and never fails
+    /// the caller (ADR-0010).
+    fn sync_after_line_move(
         &mut self,
         session: &Session,
         source: Option<&str>,

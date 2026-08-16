@@ -188,6 +188,7 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
             "write",
             "land",
             "abandon",
+            "undo",
             "request_land",
             "approve",
             "reject"

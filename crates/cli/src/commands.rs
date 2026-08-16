@@ -59,6 +59,9 @@ enum Command {
     /// Land the session's change: request plus self-approval where
     /// policy allows; otherwise the request stays pending for approvers.
     Land { session: String },
+    /// Step a landed request back off every line it landed; the request
+    /// re-opens for a new decision (ADR-0011).
+    Undo { request: String },
     /// Mirror a folder source's shared line back to its origin; parks when
     /// the origin changed out-of-band (ADR-0010).
     Sync {
@@ -122,6 +125,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
         Command::Land { session } => land(&session),
+        Command::Undo { request } => undo(&request),
         Command::Sync { source, force } => sync(source.as_deref(), force),
         Command::Watch { debounce_ms } => watch(debounce_ms),
         Command::Run {
@@ -305,6 +309,21 @@ fn land(session: &str) -> Result<Vec<String>> {
     let id: SessionId = session.parse()?;
     let outcome = workspace.land(id)?;
     Ok(render_outcome(&outcome))
+}
+
+fn undo(request: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: RequestId = request.parse()?;
+    let restores = workspace.undo(id)?;
+    let mut lines: Vec<String> = restores
+        .iter()
+        .map(|restore| match &restore.source {
+            Some(source) => format!("restored {source} {}", restore.head),
+            None => format!("restored {}", restore.head),
+        })
+        .collect();
+    lines.push(format!("{id} is open again; approvals dismissed"));
+    Ok(lines)
 }
 
 fn sync(source: Option<&str>, force: bool) -> Result<Vec<String>> {

@@ -46,6 +46,10 @@ pub enum Act {
     /// A landed line mirrored back to its folder source; the reference
     /// names the source and the synced snapshot (ADR-0010).
     Sync,
+    /// A landed request stepped back off a line: the head returned to the
+    /// landed snapshot's parent, which the reference names with the
+    /// request (ADR-0011).
+    Undo,
     /// A sync could not run — the origin changed out-of-band or refused
     /// writes — and the landing stood anyway; the reference names the
     /// source and snapshot. `atelier sync` retries; never silent.
@@ -69,6 +73,7 @@ impl Act {
             Self::ApprovalsDismissed => "approvals_dismissed",
             Self::Land => "land",
             Self::LandParked => "land_parked",
+            Self::Undo => "undo",
             Self::Sync => "sync",
             Self::SyncParked => "sync_parked",
         }
@@ -99,6 +104,7 @@ impl FromStr for Act {
             "approvals_dismissed" => Ok(Self::ApprovalsDismissed),
             "land" => Ok(Self::Land),
             "land_parked" => Ok(Self::LandParked),
+            "undo" => Ok(Self::Undo),
             "sync" => Ok(Self::Sync),
             "sync_parked" => Ok(Self::SyncParked),
             other => Err(Error::Engine(format!("unknown journal act: {other}"))),
