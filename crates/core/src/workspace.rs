@@ -23,7 +23,7 @@ use crate::journal::{Act, Journal, JournalEntry};
 use crate::landing::{Approval, GateOutcome, LandingRequest, RequestId, RequestState};
 use crate::projection::ProjectionCache;
 use crate::read::{ReadResult, window_size, window_text};
-use crate::session::{Instruction, Session, SessionId, SessionState};
+use crate::session::{Instruction, Session, SessionId, SessionState, SourceChange};
 use crate::watch::{
     STOP_TICK, WatchEvent, WatchStop, event_is_content, settle, watcher_failed, watcher_gone,
 };
@@ -348,6 +348,25 @@ impl Workspace {
             }
         };
         self.coordination.set_session_change(row, &change_id)?;
+        // The session spans every source: one working copy and one change
+        // per mount, mirroring the workspace's shape (ADR-0009).
+        let session_root = self.session_root(id);
+        for index in 0..self.mounts.len() {
+            let name = self.mounts[index].name.clone();
+            let mount_change = match self.mounts[index].engine.create_session_workspace(
+                &session_root.join(&name),
+                &format!("session-{id}"),
+                actor,
+            ) {
+                Ok(change_id) => change_id,
+                Err(error) => {
+                    self.coordination.delete_session(row)?;
+                    return Err(error);
+                }
+            };
+            self.coordination
+                .set_session_source_change(row, &name, &mount_change)?;
+        }
         self.journal.append(&JournalEntry {
             at_ms: now_ms()?,
             actor_name: actor.name.clone(),
@@ -377,8 +396,9 @@ impl Workspace {
         }
     }
 
-    /// Write `content` at `path` inside the session's working copy and
-    /// snapshot it; the id of the session's tip snapshot.
+    /// Write `content` at `path` inside the session's working copy — a
+    /// mount-scoped path lands in that source's working copy — and
+    /// snapshot every source; the id of the written source's tip snapshot.
     pub fn session_write(
         &mut self,
         id: SessionId,
@@ -387,12 +407,14 @@ impl Workspace {
     ) -> Result<String, Error> {
         self.engine.refresh()?;
         let session = self.open_session_only(id)?;
-        let file = session_file(&session.working_copy, path)?;
+        let (source, directory, inner) = self.session_target(&session, path);
+        let file = session_file(&directory, &inner)?;
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(&file, content)?;
-        self.snapshot_session(&session)
+        let tips = self.snapshot_session(&session)?;
+        Ok(tips.tip_of(source.as_deref()))
     }
 
     /// Read `path` inside the session's working copy, windowed. A document
@@ -408,7 +430,8 @@ impl Workspace {
     ) -> Result<ReadResult, Error> {
         let session = self.open_session_only(id)?;
         let size = window_size(max_bytes)?;
-        let file = session_file(&session.working_copy, path)?;
+        let (_, directory, inner) = self.session_target(&session, path);
+        let file = session_file(&directory, &inner)?;
         let bytes = fs::read(&file)?;
         if let Some(package) = self.detected(path, &bytes)? {
             let text = self.project_for_read(package, &bytes)?;
@@ -420,24 +443,34 @@ impl Workspace {
         }
     }
 
-    /// The session's change against the shared-line snapshot it forked
-    /// from, raised through the ladder like any diff.
+    /// Each source's session change against the shared-line snapshot it
+    /// forked from, raised through the ladder like any diff, mounted
+    /// addresses scoped by mount. An untouched source contributes nothing.
     pub fn session_diff(&mut self, id: SessionId) -> Result<Diff, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         let session = self.open_session_only(id)?;
-        let tip = self.snapshot_session(&session)?;
-        let base = self.engine.parent_of(&tip)?;
-        let (diff, sides) = self.engine.diff_between(&base, &tip)?;
-        self.raised(&self.engine, diff, &sides, None)
+        let tips = self.snapshot_session(&session)?;
+        let base = self.engine.parent_of(&tips.root)?;
+        let (diff, sides) = self.engine.diff_between(&base, &tips.root)?;
+        let mut deltas = self.raised(&self.engine, diff, &sides, None)?.deltas;
+        for (name, tip) in &tips.mounts {
+            let mount = self.mount(name)?;
+            let base = mount.engine.parent_of(tip)?;
+            let (diff, sides) = mount.engine.diff_between(&base, tip)?;
+            let raised = self.raised(&mount.engine, diff, &sides, Some(name))?;
+            deltas.extend(raised.deltas);
+        }
+        Ok(Diff { deltas })
     }
 
     /// Open the session's landing request — the gate's object, never a
     /// direct write (ADR-0007). Asking again returns the request already
     /// holding the gate.
     pub fn request_land(&mut self, id: SessionId) -> Result<LandingRequest, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         let session = self.open_session_only(id)?;
-        self.snapshot_session(&session)?;
+        let tips = self.snapshot_session(&session)?;
+        self.refuse_mounted_landing(&tips)?;
         if let Some(row) = self.coordination.gated_request_for_session(id.0)? {
             return self.request_from(row);
         }
@@ -472,7 +505,7 @@ impl Workspace {
     /// satisfied the apply runs — lease, rebase, advance — landing the
     /// change or parking the request on a conflict.
     pub fn approve(&mut self, id: RequestId, approver: &Actor) -> Result<GateOutcome, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         let row = self.gated_request(id)?;
         let session = self.open_session_only(SessionId(row.session_id))?;
         let policy = self.config()?.landing;
@@ -483,7 +516,12 @@ impl Workspace {
         if !policy.allow_self_approve && *approver == requester {
             return Err(Error::SelfApprovalForbidden);
         }
-        let tip = self.snapshot_session(&session)?;
+        let tips = self.snapshot_session(&session)?;
+        // Work may have arrived on a mounted source since the request
+        // opened; landing it is the fan-out slice's, and dropping it here
+        // would be silent loss.
+        self.refuse_mounted_landing(&tips)?;
+        let tip = tips.root.clone();
         // The snapshot may have dismissed approvals and re-opened the gate;
         // judge the gate on what the store holds now.
         let row = self.gated_request(id)?;
@@ -814,30 +852,84 @@ impl Workspace {
         }
     }
 
-    /// Snapshot the session's working copy; the session's tip snapshot id.
-    /// A new snapshot is journaled and runs the gate's side effects: it
-    /// dismisses approvals (policy-decided) and re-opens an approved or
-    /// parked request.
-    fn snapshot_session(&mut self, session: &Session) -> Result<String, Error> {
-        // The session's working copy shares the root's boundary: a mount
-        // name never lands on the shared line as root content.
+    /// Snapshot every source's session working copy; each source's tip.
+    /// A new snapshot — on any source — is journaled and runs the gate's
+    /// side effects: it dismisses approvals (policy-decided) and re-opens
+    /// an approved or parked request.
+    fn snapshot_session(&mut self, session: &Session) -> Result<SessionTips, Error> {
+        // The session's root working copy shares the root's boundary: a
+        // mount name never lands on the shared line as root content.
         let boundary = self.mount_boundary();
         let mut engine = Engine::open(&session.working_copy, &session.actor, &boundary)?;
         let new_snapshot = engine.snapshot_amend()?;
-        let tip = engine.head()?;
+        let root_tip = engine.head()?;
+        let mut recorded: Vec<(Option<String>, String)> = Vec::new();
         if let Some(new_snapshot) = new_snapshot {
-            self.append_session_entry(
-                &session.actor,
-                Act::Snapshot,
-                session.id,
-                Some(new_snapshot.clone()),
-            )?;
-            self.gate_reacts_to_snapshot(session, &new_snapshot)?;
-            // The landing engine reads this handle's view; fold the
-            // session's operation in.
-            self.engine.refresh()?;
+            recorded.push((None, new_snapshot));
         }
-        Ok(tip)
+        let mut mounts = Vec::new();
+        for name in boundary {
+            let mut engine = Engine::open(&session.working_copy.join(&name), &session.actor, &[])?;
+            if let Some(new_snapshot) = engine.snapshot_amend()? {
+                recorded.push((Some(name.clone()), new_snapshot));
+            }
+            mounts.push((name, engine.head()?));
+        }
+        for (source, new_snapshot) in &recorded {
+            let reference = match source {
+                Some(source) => format!("{source} {new_snapshot}"),
+                None => new_snapshot.clone(),
+            };
+            self.append_session_entry(&session.actor, Act::Snapshot, session.id, Some(reference))?;
+            self.gate_reacts_to_snapshot(session, new_snapshot)?;
+        }
+        if !recorded.is_empty() {
+            // The landing engines read this handle's view; fold the
+            // sessions' operations in.
+            self.refresh_engines()?;
+        }
+        Ok(SessionTips {
+            root: root_tip,
+            mounts,
+        })
+    }
+
+    /// The mounted source called `name`.
+    fn mount(&self, name: &str) -> Result<&MountedSource, Error> {
+        self.mounts
+            .iter()
+            .find(|mount| mount.name == name)
+            .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))
+    }
+
+    /// Where a session path lives: the mount whose name leads it, or the
+    /// session's root working copy.
+    fn session_target(&self, session: &Session, path: &str) -> (Option<String>, PathBuf, String) {
+        if let Some((first, rest)) = path.split_once('/')
+            && !rest.is_empty()
+            && self.mounts.iter().any(|mount| mount.name == first)
+        {
+            return (
+                Some(first.to_owned()),
+                session.working_copy.join(first),
+                rest.to_owned(),
+            );
+        }
+        (None, session.working_copy.clone(), path.to_owned())
+    }
+
+    /// Refuse to open the gate while a mounted source holds session work:
+    /// landing fans out in the next slice, and landing the root alone
+    /// would silently strand the mounted change.
+    fn refuse_mounted_landing(&self, tips: &SessionTips) -> Result<(), Error> {
+        for (name, tip) in &tips.mounts {
+            if self.mount(name)?.engine.tree_changed(tip)? {
+                return Err(Error::Engine(format!(
+                    "the session holds work on mounted source {name:?}; landing mounted sources arrives with the fan-out slice"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn gate_reacts_to_snapshot(
@@ -921,6 +1013,16 @@ impl Workspace {
         let change_id = row.change_id.ok_or_else(|| {
             Error::Engine(format!("session {id} has no change; its bootstrap failed"))
         })?;
+        let mut changes = vec![SourceChange {
+            source: None,
+            change_id: change_id.clone(),
+        }];
+        for (source, mount_change) in self.coordination.session_source_changes(row.id)? {
+            changes.push(SourceChange {
+                source: Some(source),
+                change_id: mount_change,
+            });
+        }
         Ok(Session {
             id,
             actor: Actor {
@@ -929,6 +1031,7 @@ impl Workspace {
             },
             state: row.state,
             change_id,
+            changes,
             working_copy: self.session_root(id),
             instruction_summary: row.instruction_summary,
             instruction_run_ref: row.instruction_run_ref,
@@ -1252,6 +1355,27 @@ impl Workspace {
 /// Every format package built into this core, in detection order.
 fn builtin_packages() -> Vec<Box<dyn FormatPackage>> {
     vec![Box::new(DocxPackage)]
+}
+
+/// Each source's session tip: the root's, and every mount's by name.
+struct SessionTips {
+    root: String,
+    mounts: Vec<(String, String)>,
+}
+
+impl SessionTips {
+    /// The tip of `source` — the root's when `None`. A session always has
+    /// a tip for every source it spans.
+    fn tip_of(&self, source: Option<&str>) -> String {
+        match source {
+            None => self.root.clone(),
+            Some(name) => self
+                .mounts
+                .iter()
+                .find(|(mount, _)| mount == name)
+                .map_or_else(|| self.root.clone(), |(_, tip)| tip.clone()),
+        }
+    }
 }
 
 /// One snapshot in one source's history: the root's when `source` is

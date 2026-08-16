@@ -316,3 +316,86 @@ fn an_lfs_git_source_refuses_at_attach() {
         "got: {error:?}"
     );
 }
+
+#[test]
+fn a_session_spans_every_source() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let app = folder_with("main.rs", "fn main() {}\n");
+    let docs = folder_with("guide.md", "# Guide\n");
+    ws.attach_mount(app.path(), "app").unwrap();
+    ws.attach_mount(docs.path(), "docs").unwrap();
+
+    let actor = atelier_core::Actor {
+        name: "scribe".to_owned(),
+        kind: atelier_core::ActorKind::Agent,
+    };
+    let instruction = atelier_core::Instruction {
+        summary: "touch two projects".to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = ws.open_session(&actor, &instruction).unwrap();
+
+    // One change per source, root first then mounts by name, every id
+    // its own.
+    let sources: Vec<Option<&str>> = session
+        .changes
+        .iter()
+        .map(|change| change.source.as_deref())
+        .collect();
+    assert_eq!(sources, vec![None, Some("app"), Some("docs")]);
+    let ids: BTreeSet<&str> = session
+        .changes
+        .iter()
+        .map(|change| change.change_id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 3, "change ids collided: {:?}", session.changes);
+
+    // Mount-scoped paths land in the mount's working copy; the mount's
+    // shared line never sees session work.
+    ws.session_write(session.id, "app/main.rs", "fn main() { run() }\n")
+        .unwrap();
+    ws.session_write(session.id, "plan.md", "# The plan\n")
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(session.working_copy.join("app").join("main.rs")).unwrap(),
+        "fn main() { run() }\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("app").join("main.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+    let read = ws.session_read(session.id, "app/main.rs", 0, None).unwrap();
+    assert_eq!(read.content, "fn main() { run() }\n");
+
+    // The session diff spans the touched sources, scoped; the untouched
+    // docs source contributes nothing.
+    let diff = ws.session_diff(session.id).unwrap();
+    let addresses: Vec<&str> = diff
+        .deltas
+        .iter()
+        .map(|delta| delta.address.as_str())
+        .collect();
+    assert_eq!(addresses, vec!["plan.md", "app/main.rs"]);
+
+    // Landing a session that holds mounted work refuses by name until the
+    // fan-out slice; a root-only session still lands.
+    let refused = ws.land(session.id).unwrap_err();
+    assert!(
+        refused.to_string().contains("fan-out slice"),
+        "got: {refused}"
+    );
+    let root_only = ws.open_session(&actor, &instruction).unwrap();
+    ws.session_write(root_only.id, "notes.md", "root work\n")
+        .unwrap();
+    let outcome = ws.land(root_only.id).unwrap();
+    assert!(
+        matches!(outcome, atelier_core::GateOutcome::Landed { .. }),
+        "got: {outcome:?}"
+    );
+}
