@@ -134,7 +134,8 @@ POST /v1/sessions/{s}/request-land
 POST /v1/sessions/{s}/land
 POST /v1/sessions/{s}/abandon
 POST /v1/requests/{id}/approve        body may name the actor (actor_name, actor_kind)
-POST /v1/requests/{id}/reject        body may carry a reason
+POST /v1/requests/{id}/reject         body may carry a reason
+POST /v1/requests/{id}/undo           step a landed request back off its lines (ADR-0011)
 ```
 
 Statuses: 400 broken protocol · 401 unauthorized · 422 domain refusal
@@ -148,7 +149,7 @@ constant-time compare). Binding beyond loopback requires `--allow-remote`
 
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier watch` · `atelier undo <op>` · `atelier serve [--mcp-stdio | --http]`
+`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http]`
 
 The human review flow is the v1 demo: agent `request_land`s → human runs `atelier requests`, reads the docx diff as markdown, `atelier approve` → change lands.
 

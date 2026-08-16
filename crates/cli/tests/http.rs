@@ -1,6 +1,10 @@
 //! The HTTP surface end to end: MCP streamable HTTP and REST are reach,
 //! not capability — the same verbs, the same core path, the same journal
 //! acts as MCP over stdio (ADR-0006).
+#![expect(
+    clippy::too_many_lines,
+    reason = "a test tells one story end to end; fragmenting it would hide the transition being pinned"
+)]
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -692,6 +696,17 @@ fn rest_speaks_every_verb_the_tools_speak() {
         &json!({"actor_name": "approver", "actor_kind": "human"}),
     );
     assert_eq!(outcome["state"], "landed");
+
+    // Undo re-opens the gate over REST; approving again lands again.
+    let undone = server.json("POST", "/v1/requests/r1/undo", &json!({}));
+    assert_eq!(undone["state"], "open");
+    assert_eq!(undone["restored"][0]["source"], Value::Null);
+    let relanded = server.json(
+        "POST",
+        "/v1/requests/r1/approve",
+        &json!({"actor_name": "approver", "actor_kind": "human"}),
+    );
+    assert_eq!(relanded["state"], "landed");
 
     // A second session rejects; a third abandons.
     server.json(
