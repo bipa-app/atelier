@@ -7,3 +7,7 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+atelier-core = { path = "../core" }
+serde_json.workspace = true

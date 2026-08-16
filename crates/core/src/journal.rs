@@ -21,6 +21,28 @@ pub enum Act {
     /// A file exceeded the ladder's size cap; its delta stayed at the
     /// binary rung. The entry's reference names the file and the cap.
     FileTooLarge,
+    /// An actor opened a session; the entry carries the instruction's
+    /// summary and run reference (verbatim per policy, ADR-0004).
+    SessionOpen,
+    /// The session closed without landing; its work stays in history.
+    SessionAbandon,
+    /// A session opened a landing request; the reference names it.
+    LandRequest,
+    /// An actor approved a landing request; the reference names the
+    /// request and the snapshot the approval covers.
+    Approve,
+    /// An actor rejected a landing request; the reference names it and
+    /// carries the reason when one was given.
+    Reject,
+    /// A new snapshot on the change dismissed the request's approvals; the
+    /// reference names the request and the snapshot.
+    ApprovalsDismissed,
+    /// A change landed on the shared line; the reference names the request
+    /// and the landed snapshot.
+    Land,
+    /// A landing attempt hit a conflict and parked its request; the shared
+    /// line did not move. The reference names the request.
+    LandParked,
 }
 
 impl Act {
@@ -32,6 +54,14 @@ impl Act {
             Self::Snapshot => "snapshot",
             Self::PackageFailed => "package_failed",
             Self::FileTooLarge => "file_too_large",
+            Self::SessionOpen => "session_open",
+            Self::SessionAbandon => "session_abandon",
+            Self::LandRequest => "land_request",
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::ApprovalsDismissed => "approvals_dismissed",
+            Self::Land => "land",
+            Self::LandParked => "land_parked",
         }
     }
 }
@@ -52,6 +82,14 @@ impl FromStr for Act {
             "snapshot" => Ok(Self::Snapshot),
             "package_failed" => Ok(Self::PackageFailed),
             "file_too_large" => Ok(Self::FileTooLarge),
+            "session_open" => Ok(Self::SessionOpen),
+            "session_abandon" => Ok(Self::SessionAbandon),
+            "land_request" => Ok(Self::LandRequest),
+            "approve" => Ok(Self::Approve),
+            "reject" => Ok(Self::Reject),
+            "approvals_dismissed" => Ok(Self::ApprovalsDismissed),
+            "land" => Ok(Self::Land),
+            "land_parked" => Ok(Self::LandParked),
             other => Err(Error::Engine(format!("unknown journal act: {other}"))),
         }
     }
@@ -105,33 +143,8 @@ pub struct Journal {
 impl Journal {
     /// Open (creating if absent) the journal at `path` and ensure its schema.
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let conn = Connection::open(path).map_err(engine_err)?;
-        let journal = Self { conn };
-        journal.ensure_schema()?;
-        Ok(journal)
-    }
-
-    fn ensure_schema(&self) -> Result<(), Error> {
-        self.conn
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS journal (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    at_ms INTEGER NOT NULL,
-                    actor_name TEXT NOT NULL,
-                    actor_kind TEXT NOT NULL,
-                    act TEXT NOT NULL,
-                    session TEXT,
-                    instruction_summary TEXT,
-                    instruction_run_ref TEXT,
-                    instruction_verbatim TEXT,
-                    reference TEXT
-                );",
-            )
-            .map_err(engine_err)?;
-        self.conn
-            .pragma_update(None, "user_version", 1)
-            .map_err(engine_err)?;
-        Ok(())
+        let conn = crate::store::open_connection(path)?;
+        Ok(Self { conn })
     }
 
     /// Append one entry to the journal.
