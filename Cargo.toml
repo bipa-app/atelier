@@ -37,6 +37,8 @@ quick-xml = "0.41"
 # the zlib-rs backend); the blanket `deflate` feature would also pull in the
 # zopfli compressor, and bare `deflate-flate2` leaves flate2 with no backend.
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The HTTP transports' server: synchronous like the core, no runtime.
+tiny_http = "0.12"
 time = { version = "0.3", default-features = false, features = ["formatting"] }
 assert_cmd = "2"
 predicates = { version = "3", default-features = false, features = ["diff", "regex"] }

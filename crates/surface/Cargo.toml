@@ -11,5 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
+tiny_http.workspace = true
 atelier-core = { path = "../core" }
 serde_json.workspace = true
