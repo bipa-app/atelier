@@ -230,3 +230,158 @@ fn an_underline_without_a_style_is_an_error() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn two_ranges_changing_differently_yield_two_ordered_deltas() {
+    let before = paragraph("", "keep this part loud");
+    let after = "<w:p><w:r><w:t xml:space=\"preserve\">keep </w:t></w:r>\
+                 <w:r><w:rPr><w:sz w:val=\"28\"/></w:rPr><w:t>this</w:t></w:r>\
+                 <w:r><w:t xml:space=\"preserve\"> part </w:t></w:r>\
+                 <w:r><w:rPr><w:u w:val=\"single\"/></w:rPr><w:t>loud</w:t></w:r></w:p>"
+        .to_owned();
+
+    let deltas = rich(&before, &after);
+
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"this\" font size default → 14")
+    );
+    assert_eq!(
+        deltas[1].summary.as_deref(),
+        Some("\"loud\" underline none → single")
+    );
+    assert_eq!(deltas[0].address, deltas[1].address);
+}
+
+#[test]
+fn addresses_follow_the_after_side_across_an_insertion() {
+    // A paragraph inserted above must not shift the blame: the address
+    // names the paragraph where the reader will find it now.
+    let before = format!(
+        "{}{}",
+        paragraph("", "alpha"),
+        paragraph(r#"<w:sz w:val="22"/>"#, "resize this clause"),
+    );
+    let after = format!(
+        "{}{}{}",
+        paragraph("", "inserted between"),
+        paragraph("", "alpha"),
+        paragraph(r#"<w:sz w:val="28"/>"#, "resize this clause"),
+    );
+
+    let deltas = rich(&before, &after);
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].address.as_str(), "paragraph 3");
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"resize this clause\" font size 11 → 14")
+    );
+}
+
+#[test]
+fn historical_properties_in_rpr_change_never_reach_a_delta() {
+    // The revision record carries the rejected size (5) beside the
+    // accepted one (14); only the accepted properties compare.
+    let before = paragraph(r#"<w:sz w:val="22"/>"#, "clause");
+    let after = paragraph(
+        r#"<w:rPrChange w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:rPr><w:sz w:val="10"/></w:rPr></w:rPrChange><w:sz w:val="28"/>"#,
+        "clause",
+    );
+
+    let deltas = rich(&before, &after);
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"clause\" font size 11 → 14")
+    );
+}
+
+#[test]
+fn table_cell_paragraphs_count_in_document_order() {
+    let table = |rpr: &str| {
+        format!(
+            "<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>",
+            paragraph(rpr, "cell clause")
+        )
+    };
+    let before = format!(
+        "{}{}",
+        paragraph("", "intro"),
+        table(r#"<w:sz w:val="22"/>"#)
+    );
+    let after = format!(
+        "{}{}",
+        paragraph("", "intro"),
+        table(r#"<w:sz w:val="28"/>"#)
+    );
+
+    let deltas = rich(&before, &after);
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].address.as_str(), "paragraph 2");
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"cell clause\" font size 11 → 14")
+    );
+}
+
+#[test]
+fn paragraph_mark_properties_never_yield_a_delta() {
+    // w:pPr/w:rPr formats the paragraph mark, not any text; a size change
+    // there is invisible to the run-property model.
+    let mark = |size: &str| {
+        format!(
+            "<w:p><w:pPr><w:rPr><w:sz w:val=\"{size}\"/></w:rPr></w:pPr><w:r><w:t>steady text</w:t></w:r></w:p>"
+        )
+    };
+
+    let deltas = rich(&mark("22"), &mark("28"));
+
+    assert_eq!(deltas, Vec::new());
+}
+
+#[test]
+fn formatting_an_empty_paragraph_yields_no_delta() {
+    let empty = |rpr: &str| format!("<w:p><w:r><w:rPr>{rpr}</w:rPr></w:r></w:p>");
+
+    let deltas = rich(&empty(""), &empty("<w:b/><w:u w:val=\"single\"/>"));
+
+    assert_eq!(deltas, Vec::new());
+}
+
+#[test]
+fn a_range_spanning_a_hard_break_reports_with_the_break_escaped() {
+    let with_break = |rpr: &str| {
+        format!(
+            "<w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>first</w:t><w:br/><w:t>second</w:t></w:r></w:p>"
+        )
+    };
+
+    let deltas = rich(&with_break(""), &with_break(r#"<w:u w:val="single"/>"#));
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"first\\nsecond\" underline none → single")
+    );
+}
+
+#[test]
+fn multibyte_ranges_name_exactly_the_changed_text() {
+    let before = paragraph("", "um café bem quente");
+    let after = "<w:p><w:r><w:t xml:space=\"preserve\">um </w:t></w:r>\
+                 <w:r><w:rPr><w:sz w:val=\"28\"/></w:rPr><w:t>café</w:t></w:r>\
+                 <w:r><w:t xml:space=\"preserve\"> bem quente</w:t></w:r></w:p>"
+        .to_owned();
+
+    let deltas = rich(&before, &after);
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(
+        deltas[0].summary.as_deref(),
+        Some("\"café\" font size default → 14")
+    );
+}

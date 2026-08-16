@@ -1571,3 +1571,112 @@ fn emphasis_markers_never_cross_a_hard_break() {
 
     assert_eq!(projection.text, "**first**\n**second**\n");
 }
+
+#[test]
+fn emphasis_in_table_cells_stays_marked_and_literal_markers_stay_escaped() {
+    // The two escaping layers compose: inline escaping at span assembly,
+    // then the cell encoding's own backslash doubling — a bold cell and a
+    // cell that literally says **x** must never render alike.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>**x**</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(
+        projection.text,
+        "| **x** | \\\\*\\\\*x\\\\*\\\\* |\n| --- | --- |\n"
+    );
+}
+
+#[test]
+fn a_bold_heading_keeps_marks_and_markers() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Quarterly report</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "# **Quarterly report**\n");
+}
+
+#[test]
+fn a_bold_list_item_keeps_its_marker_and_its_emphasis() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>First point</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "- **First point**\n");
+}
+
+#[test]
+fn bold_text_that_says_a_list_marker_stays_distinct_from_both() {
+    // Three worlds, three projections: a real list item, plain text that
+    // says "1. Scope", and bold text that says "1. Scope".
+    let bold = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>1. Scope</w:t></w:r></w:p></w:body></w:document>"#;
+    let plain = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>1. Scope</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let bold_projection = DocxPackage.project(&docx(bold)).unwrap();
+    let plain_projection = DocxPackage.project(&docx(plain)).unwrap();
+
+    assert_eq!(bold_projection.text, "**1. Scope**\n");
+    assert_eq!(plain_projection.text, "1\\. Scope\n");
+    assert_ne!(bold_projection.text, plain_projection.text);
+}
+
+#[test]
+fn historical_emphasis_in_rpr_change_never_applies() {
+    // The pre-revision properties inside w:rPrChange are the rejected
+    // past; their bold must not mark the accepted text.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rPrChange w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>plain text</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "plain text\n");
+}
+
+#[test]
+fn a_pending_insertion_keeps_its_emphasis() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:r><w:rPr><w:b/></w:rPr><w:t>added bold</w:t></w:r></w:ins></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "**added bold**\n");
+}
+
+#[test]
+fn a_deleted_mark_merge_keeps_both_sides_emphasis() {
+    // Two bold paragraphs merged by a deleted paragraph mark: each side
+    // keeps its own markers; the seam stays visible and deterministic.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:rPr><w:del w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>alpha</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>beta</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "**alpha****beta**\n");
+}
+
+#[test]
+fn a_symbol_asterisk_escapes_like_typed_text() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:sym w:font="Wingdings" w:char="2A"/><w:t>note</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "\\*note\n");
+}
+
+#[test]
+fn multibyte_text_keeps_emphasis_edges_exact() {
+    // Accented text with edge whitespace: span trimming works in bytes,
+    // and any byte/char mixup would split a codepoint or move a marker.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> café résumé </w:t></w:r><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, " **café résumé** plain\n");
+}
