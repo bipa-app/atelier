@@ -31,6 +31,40 @@ journal                       who did what, attributed, always
 Editing never takes a lease; landing always passes the gate. A parked landing is a
 value, not an error: resolve in the session and approve again — what landed stands.
 
+## The deepest integration is no integration: `atelier run`
+
+```sh
+atelier run --summary "wire the retry path" -- claude
+atelier run --summary "fix the flaky test" --land -- codex exec "…"
+```
+
+`run` opens a session and starts the command inside its working copy — a real
+directory, so the harness's native file tools, builds, and tests all flow
+through atelier with no interception. On exit it snapshots, prints the session
+diff, and leaves the session holding the change (`--land` lands on success; a
+failing command keeps its work versioned in the open session). This works for
+every harness, including ones with no plugin system at all.
+
+## The plugin: one repo, three installers
+
+This repository is itself a passive plugin — the `atelier-workspace-loop`
+skill plus, for Claude Code, a SessionStart hook that injects
+`atelier manifest` as context when the project is a workspace (silent
+anywhere else).
+
+```sh
+omp plugin install git@github.com:bipa-app/atelier     # Oh My Pi
+pi install git:git@github.com:bipa-app/atelier         # pi
+claude plugin install atelier@<marketplace>            # Claude Code, or:
+claude --plugin-dir ~/work/atelier                     # local
+```
+
+codex has no plugin system; install the skill directly:
+
+```sh
+cp -r skills/atelier-workspace-loop "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
 ## Claude Code
 
 `.mcp.json` at the workspace root (Claude Code starts the server itself):
