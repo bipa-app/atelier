@@ -1,6 +1,6 @@
 # ADR-0013: Hosted workspaces — the celld pattern, not the celld runtime
 
-Status: proposed (2026-08-16) — awaiting ratification (R3, ENG-9815)
+Status: accepted (2026-08-16, ratified by Luiz) — implementation: H1–H3 (ENG-9816…9818)
 
 > Revised after reading celld's source (the first draft reasoned from its
 > README): the SQLite replication and fencing are not celld-internal — they

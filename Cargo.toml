@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/diff-core",
     "crates/format-docx",
+    "crates/hosted",
     "crates/source-remote",
     "crates/surface",
     "crates/cli",
@@ -27,13 +28,14 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 gix-hash = "0.25"
 # fs events only trigger snapshots; nothing from notify reaches an output path.
 notify = "8"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3", default-features = false, features = ["std", "text"] }
 sha2 = "0.10"
 object_store = { version = "0.14", features = ["aws", "gcp", "azure"] }
+rustyriver = "0.1.0"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 url = "2.5"
 quick-xml = "0.41"
