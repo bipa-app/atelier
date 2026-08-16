@@ -20,7 +20,7 @@ use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
 use crate::engine::{DiffSides, Engine, FileBlob, LandOutcome, MAX_LADDER_FILE_SIZE, Side};
 use crate::error::{Error, config_err};
 use crate::journal::{Act, Journal, JournalEntry};
-use crate::landing::{Approval, GateOutcome, LandingRequest, RequestId, RequestState};
+use crate::landing::{Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState};
 use crate::projection::ProjectionCache;
 use crate::read::{ReadResult, window_size, window_text};
 use crate::session::{Instruction, Session, SessionId, SessionState, SourceChange};
@@ -469,8 +469,7 @@ impl Workspace {
     pub fn request_land(&mut self, id: SessionId) -> Result<LandingRequest, Error> {
         self.refresh_engines()?;
         let session = self.open_session_only(id)?;
-        let tips = self.snapshot_session(&session)?;
-        self.refuse_mounted_landing(&tips)?;
+        self.snapshot_session(&session)?;
         if let Some(row) = self.coordination.gated_request_for_session(id.0)? {
             return self.request_from(row);
         }
@@ -517,10 +516,9 @@ impl Workspace {
             return Err(Error::SelfApprovalForbidden);
         }
         let tips = self.snapshot_session(&session)?;
-        // Work may have arrived on a mounted source since the request
-        // opened; landing it is the fan-out slice's, and dropping it here
-        // would be silent loss.
-        self.refuse_mounted_landing(&tips)?;
+        // The approval covers the change as its root tip names it; a new
+        // snapshot on any source dismisses approvals through the gate's
+        // side effects, so a stale approval never carries later work.
         let tip = tips.root.clone();
         // The snapshot may have dismissed approvals and re-opened the gate;
         // judge the gate on what the store holds now.
@@ -565,7 +563,7 @@ impl Workspace {
                 });
             }
         }
-        self.apply(&session, id, &tip, approver)
+        self.apply(&session, id, &tips, approver)
     }
 
     /// Reject the request: the gate closes, the session stays open.
@@ -748,24 +746,98 @@ impl Workspace {
         Ok(())
     }
 
-    /// The gate-satisfied apply: serialize on the landing lease, then
-    /// rebase and advance — or park. Editing never takes this lease; only
-    /// landing does.
+    /// The gate-satisfied apply, fanned out per source (ADR-0009): the
+    /// root first, then mounts in name order; each touched line takes its
+    /// own lease, rebases, and advances — or parks. A landing already
+    /// recorded for this request is never repeated, so a retry after a
+    /// park or a lost lease finishes what remains. Editing never takes a
+    /// lease; only landing does.
     fn apply(
         &mut self,
         session: &Session,
         id: RequestId,
-        tip: &str,
+        tips: &SessionTips,
         approver: &Actor,
     ) -> Result<GateOutcome, Error> {
+        let already = self.coordination.landings(id.0)?;
+        let mut parked = Vec::new();
+        // The root always lands — the v1 line, even when untouched, so a
+        // zero-mount workspace keeps its exact behavior. Mounts land only
+        // when their session change carries work.
+        let mut plan: Vec<(Option<String>, String)> = vec![(None, tips.root.clone())];
+        for (name, tip) in &tips.mounts {
+            if self.mount(name)?.engine.tree_changed(tip)? {
+                plan.push((Some(name.clone()), tip.clone()));
+            }
+        }
+        for (source, tip) in plan {
+            if already.iter().any(|(landed, _)| *landed == source) {
+                continue;
+            }
+            match self.apply_source(session, id, source.as_deref(), &tip, approver)? {
+                LandOutcome::Landed { .. } => {}
+                LandOutcome::Conflicted => parked.push(source),
+            }
+        }
+        let landings: Vec<Landing> = self
+            .coordination
+            .landings(id.0)?
+            .into_iter()
+            .map(|(source, snapshot)| Landing { source, snapshot })
+            .collect();
+        if parked.is_empty() {
+            // Losing the request move means the gate re-opened for a newer
+            // snapshot or the session was abandoned mid-apply — the
+            // winner's state stands and the session stays open for its
+            // remaining work; the landings are recorded either way.
+            if self.coordination.move_request_state(
+                id.0,
+                &[RequestState::Approved],
+                RequestState::Landed,
+            )? {
+                let _ = self.coordination.move_session_state(
+                    session.id.0,
+                    SessionState::Open,
+                    SessionState::Landed,
+                )?;
+            }
+            return Ok(GateOutcome::Landed { landings });
+        }
+        // A parked line closes the gate until a new snapshot; what landed
+        // stands (ADR-0009 — never pretended atomicity).
+        let _ = self.coordination.move_request_state(
+            id.0,
+            &[RequestState::Approved],
+            RequestState::Parked,
+        )?;
+        Ok(GateOutcome::Parked {
+            request: self.request(id)?,
+            landings,
+            parked,
+        })
+    }
+
+    /// Land one source's tip under its own lease; the outcome of that one
+    /// line. The landing journals and records with its source, so nothing
+    /// repeats it and nothing mistakes it for another line's.
+    fn apply_source(
+        &mut self,
+        session: &Session,
+        id: RequestId,
+        source: Option<&str>,
+        tip: &str,
+        approver: &Actor,
+    ) -> Result<LandOutcome, Error> {
+        let point = match source {
+            Some(name) => format!("{LANDING_LEASE_POINT}/{name}"),
+            None => LANDING_LEASE_POINT.to_owned(),
+        };
         let holder = format!("{}:{}", self.actor.name, std::process::id());
         let now = now_ms()?;
-        match self.coordination.claim_lease(
-            LANDING_LEASE_POINT,
-            &holder,
-            now,
-            LANDING_LEASE_TTL_MS,
-        )? {
+        match self
+            .coordination
+            .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
+        {
             LeaseClaim::HeldByOther {
                 holder,
                 expires_at_ms,
@@ -777,79 +849,66 @@ impl Workspace {
             }
             LeaseClaim::Held => {}
         }
-        let outcome = self.apply_holding_lease(session, id, tip, approver);
-        let released = self
-            .coordination
-            .release_lease(LANDING_LEASE_POINT, &holder);
+        let outcome = self.apply_source_holding_lease(session, id, source, tip, approver);
+        let released = self.coordination.release_lease(&point, &holder);
         let outcome = outcome?;
         released?;
         Ok(outcome)
     }
 
-    fn apply_holding_lease(
+    fn apply_source_holding_lease(
         &mut self,
         session: &Session,
         id: RequestId,
+        source: Option<&str>,
         tip: &str,
         approver: &Actor,
-    ) -> Result<GateOutcome, Error> {
+    ) -> Result<LandOutcome, Error> {
         // Test seam: the cross-process lease test needs the winner to hold
         // the point long enough for the loser to observe `LeaseHeld`.
         if let Some(hold) = land_hold_ms()? {
             std::thread::sleep(Duration::from_millis(hold));
         }
-        // Another process may have advanced the line since the gate check;
-        // the lease is held, so this head stays put through the apply.
-        self.engine.refresh()?;
+        // Another process may have advanced this line since the gate
+        // check; the lease is held, so the head stays put through the
+        // apply.
+        self.refresh_engines()?;
         self.auto_snapshot()?;
-        match self.engine.land(tip)? {
+        let outcome = match source {
+            None => self.engine.land(tip)?,
+            Some(name) => {
+                let index = self
+                    .mounts
+                    .iter()
+                    .position(|mount| mount.name == name)
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                self.mounts[index].engine.land(tip)?
+            }
+        };
+        let scoped = |text: &str| match source {
+            Some(name) => format!("{name} {text}"),
+            None => text.to_owned(),
+        };
+        match &outcome {
             LandOutcome::Conflicted => {
-                // Losing this move means the gate moved first — a newer
-                // snapshot re-opened it, or the session was abandoned.
-                // The winner's state stands; the parked attempt is still
-                // journaled, and the returned request carries live state.
-                let _ = self.coordination.move_request_state(
-                    id.0,
-                    &[RequestState::Approved],
-                    RequestState::Parked,
-                )?;
                 self.append_session_entry(
                     approver,
                     Act::LandParked,
                     session.id,
-                    Some(id.to_string()),
+                    Some(scoped(&id.to_string())),
                 )?;
-                Ok(GateOutcome::Parked {
-                    request: self.request(id)?,
-                })
             }
             LandOutcome::Landed { snapshot } => {
-                // The shared line advanced: that is history, whatever the
-                // store rows say. Losing the request move means the gate
-                // re-opened for a newer snapshot or the session was
-                // abandoned mid-apply — the winner's state stands and the
-                // session stays open for its remaining work; the landing
-                // is journaled either way.
-                if self.coordination.move_request_state(
-                    id.0,
-                    &[RequestState::Approved],
-                    RequestState::Landed,
-                )? {
-                    let _ = self.coordination.move_session_state(
-                        session.id.0,
-                        SessionState::Open,
-                        SessionState::Landed,
-                    )?;
-                }
+                self.coordination.record_landing(id.0, source, snapshot)?;
                 self.append_session_entry(
                     approver,
                     Act::Land,
                     session.id,
-                    Some(format!("{id} {snapshot}")),
+                    Some(scoped(&format!("{id} {snapshot}"))),
                 )?;
-                Ok(GateOutcome::Landed { snapshot })
             }
         }
+        Ok(outcome)
     }
 
     /// Snapshot every source's session working copy; each source's tip.
@@ -916,20 +975,6 @@ impl Workspace {
             );
         }
         (None, session.working_copy.clone(), path.to_owned())
-    }
-
-    /// Refuse to open the gate while a mounted source holds session work:
-    /// landing fans out in the next slice, and landing the root alone
-    /// would silently strand the mounted change.
-    fn refuse_mounted_landing(&self, tips: &SessionTips) -> Result<(), Error> {
-        for (name, tip) in &tips.mounts {
-            if self.mount(name)?.engine.tree_changed(tip)? {
-                return Err(Error::Engine(format!(
-                    "the session holds work on mounted source {name:?}; landing mounted sources arrives with the fan-out slice"
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn gate_reacts_to_snapshot(

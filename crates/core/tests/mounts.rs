@@ -383,19 +383,229 @@ fn a_session_spans_every_source() {
         .collect();
     assert_eq!(addresses, vec!["plan.md", "app/main.rs"]);
 
-    // Landing a session that holds mounted work refuses by name until the
-    // fan-out slice; a root-only session still lands.
-    let refused = ws.land(session.id).unwrap_err();
-    assert!(
-        refused.to_string().contains("fan-out slice"),
-        "got: {refused}"
+    // One request fans out: the root and the touched mount land, the
+    // untouched docs source is never touched — no lease, no landing.
+    let outcome = ws.land(session.id).unwrap();
+    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+        panic!("the fan-out must land both touched sources, got {outcome:?}");
+    };
+    let landed: Vec<Option<&str>> = landings
+        .iter()
+        .map(|landing| landing.source.as_deref())
+        .collect();
+    assert_eq!(landed, vec![None, Some("app")]);
+    // Both shared lines materialized their changes.
+    assert_eq!(
+        fs::read_to_string(root.path().join("plan.md")).unwrap(),
+        "# The plan\n"
     );
-    let root_only = ws.open_session(&actor, &instruction).unwrap();
-    ws.session_write(root_only.id, "notes.md", "root work\n")
-        .unwrap();
-    let outcome = ws.land(root_only.id).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join("app").join("main.rs")).unwrap(),
+        "fn main() { run() }\n"
+    );
+    // One land act per source under one session; the mounted one names
+    // its mount.
+    let entries = ws.journal(50).unwrap();
+    let land_refs: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.act == atelier_core::Act::Land)
+        .filter_map(|entry| entry.reference.as_deref())
+        .collect();
+    assert_eq!(land_refs.len(), 2, "journal: {entries:#?}");
     assert!(
-        matches!(outcome, atelier_core::GateOutcome::Landed { .. }),
-        "got: {outcome:?}"
+        land_refs.iter().any(|r| r.starts_with("app r1 ")),
+        "no mounted land act: {land_refs:?}"
+    );
+    assert!(
+        land_refs.iter().any(|r| r.starts_with("r1 ")),
+        "no root land act: {land_refs:?}"
+    );
+    assert_eq!(
+        ws.session(session.id).unwrap().state,
+        atelier_core::SessionState::Landed
+    );
+}
+
+#[test]
+fn a_parked_mount_leaves_the_landed_sources_standing() {
+    // The partial-landing story, end to end: A lands, B parks on a
+    // conflict, the session stays open; resolving B re-lands it — and
+    // the re-apply never repeats A's landing.
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    let a = folder_with("a.txt", "a\n");
+    let b = folder_with("b.txt", "b\n");
+    ws.attach_mount(a.path(), "aa").unwrap();
+    ws.attach_mount(b.path(), "bb").unwrap();
+
+    let actor = atelier_core::Actor {
+        name: "scribe".to_owned(),
+        kind: atelier_core::ActorKind::Agent,
+    };
+    let instruction = atelier_core::Instruction {
+        summary: "land across two projects".to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = ws.open_session(&actor, &instruction).unwrap();
+    ws.session_write(session.id, "aa/a.txt", "a from the session\n")
+        .unwrap();
+    ws.session_write(session.id, "bb/b.txt", "b from the session\n")
+        .unwrap();
+
+    // The bb line moves with a conflicting edit before the landing.
+    fs::write(root.path().join("bb").join("b.txt"), "b from a human\n").unwrap();
+    ws.journal(1).unwrap();
+
+    let outcome = ws.land(session.id).unwrap();
+    let atelier_core::GateOutcome::Parked {
+        request,
+        landings,
+        parked,
+    } = outcome
+    else {
+        panic!("the conflicting mount must park, got {outcome:?}");
+    };
+    assert_eq!(parked, vec![Some("bb".to_owned())]);
+    let landed: Vec<Option<&str>> = landings
+        .iter()
+        .map(|landing| landing.source.as_deref())
+        .collect();
+    assert_eq!(landed, vec![None, Some("aa")]);
+    // What landed stands; the parked line never moved.
+    assert_eq!(
+        fs::read_to_string(root.path().join("aa").join("a.txt")).unwrap(),
+        "a from the session\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("bb").join("b.txt")).unwrap(),
+        "b from a human\n"
+    );
+    assert_eq!(
+        ws.session(session.id).unwrap().state,
+        atelier_core::SessionState::Open
+    );
+
+    // Resolve bb in the session: concede the contested line to the human
+    // (revert the session's b.txt edit to its base) and carry the work as
+    // a fresh file. The new snapshot re-opens the gate; the retry lands
+    // only what remains.
+    ws.session_write(session.id, "bb/b.txt", "b\n").unwrap();
+    ws.session_write(session.id, "bb/c.txt", "the resolution\n")
+        .unwrap();
+    let outcome = ws.approve(request.id, &actor).unwrap();
+    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+        panic!("the resolved retry must land, got {outcome:?}");
+    };
+    let landed: Vec<Option<&str>> = landings
+        .iter()
+        .map(|landing| landing.source.as_deref())
+        .collect();
+    assert_eq!(landed, vec![None, Some("aa"), Some("bb")]);
+    assert_eq!(
+        fs::read_to_string(root.path().join("bb").join("b.txt")).unwrap(),
+        "b from a human\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("bb").join("c.txt")).unwrap(),
+        "the resolution\n"
+    );
+    assert_eq!(
+        ws.session(session.id).unwrap().state,
+        atelier_core::SessionState::Landed
+    );
+    // aa landed exactly once: one land act names it across both applies.
+    let entries = ws.journal(100).unwrap();
+    let aa_lands = entries
+        .iter()
+        .filter(|entry| entry.act == atelier_core::Act::Land)
+        .filter(|entry| {
+            entry
+                .reference
+                .as_deref()
+                .is_some_and(|r| r.starts_with("aa "))
+        })
+        .count();
+    assert_eq!(aa_lands, 1);
+}
+
+#[test]
+fn watch_routes_external_edits_into_the_owning_history() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    let app = folder_with("main.rs", "fn main() {}\n");
+    ws.attach_mount(app.path(), "app").unwrap();
+    let app_head_before = ws
+        .log(1)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.source.as_deref() == Some("app"))
+        .expect("app has a history")
+        .snapshot
+        .id;
+
+    let stop = atelier_core::WatchStop::new();
+    let loop_stop = stop.clone();
+    let (tx, events) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        ws.watch(
+            std::time::Duration::from_millis(100),
+            |event| {
+                let _ = tx.send(event.clone());
+            },
+            &loop_stop,
+        )
+        .expect("watch loop runs until stopped");
+        ws
+    });
+    assert_eq!(
+        events
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the watcher arms"),
+        atelier_core::WatchEvent::Started
+    );
+
+    fs::write(
+        root.path().join("app").join("main.rs"),
+        "fn main() { run() }\n",
+    )
+    .unwrap();
+    let event = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the mount edit snapshots");
+    assert!(
+        matches!(event, atelier_core::WatchEvent::Snapshotted { .. }),
+        "got: {event:?}"
+    );
+    stop.stop();
+    let mut ws = handle.join().expect("watch thread joins");
+
+    // The snapshot landed in the mount's history — not the root's — and
+    // journaled with its mount.
+    let app_head_after = ws
+        .log(1)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.source.as_deref() == Some("app"))
+        .expect("app has a history")
+        .snapshot
+        .id;
+    assert_ne!(app_head_before, app_head_after);
+    let entries = ws.journal(20).unwrap();
+    assert!(
+        entries.iter().any(|entry| {
+            entry.act == atelier_core::Act::Snapshot
+                && entry
+                    .reference
+                    .as_deref()
+                    .is_some_and(|r| r == format!("app {app_head_after}"))
+        }),
+        "no mounted snapshot act: {entries:#?}"
     );
 }

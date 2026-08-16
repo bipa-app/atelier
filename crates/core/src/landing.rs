@@ -111,17 +111,32 @@ pub struct Approval {
     pub at_ms: i64,
 }
 
-/// What a landing attempt produced.
+/// One source's landing under a request: the root's when `source` is
+/// `None`; the source's shared line's new head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Landing {
+    pub source: Option<String>,
+    pub snapshot: String,
+}
+
+/// What a landing attempt produced. The apply fans out per source
+/// (ADR-0009): every landing that happened is recorded and stands,
+/// whatever the sources after it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateOutcome {
-    /// The change landed; the shared line's new head.
-    Landed { snapshot: String },
+    /// Every touched source landed.
+    Landed { landings: Vec<Landing> },
     /// The gate wants more approvals before the apply runs.
     Pending {
         request: LandingRequest,
         required: u32,
     },
-    /// The apply hit a conflict: the request parked and the shared line
-    /// did not move (ADR-0007).
-    Parked { request: LandingRequest },
+    /// At least one source's apply hit a conflict: the request parked,
+    /// that line did not move — and the sources in `landings` landed
+    /// before or despite it (ADR-0007, per line).
+    Parked {
+        request: LandingRequest,
+        landings: Vec<Landing>,
+        parked: Vec<Option<String>>,
+    },
 }
