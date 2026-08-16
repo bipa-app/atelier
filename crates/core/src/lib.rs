@@ -17,6 +17,7 @@ mod workspace;
 pub use atelier_diff_core::{
     Address, Confidence, Delta, DeltaKind, Diff, Fidelity, Line, LineKind, PackageId,
 };
+pub use atelier_source_remote::is_remote_url;
 pub use config::{
     Actor, ActorKind, InstructionFidelity, JournalPolicy, LandingPolicy, Source, SourceKind,
     SyncPolicy,
