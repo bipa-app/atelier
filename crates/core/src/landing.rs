@@ -112,6 +112,14 @@ pub struct Approval {
 }
 
 /// One source's landing under a request: the root's when `source` is
+/// One line a landed request stepped back off (ADR-0011): the source
+/// and the head the line returned to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restore {
+    pub source: Option<String>,
+    pub head: String,
+}
+
 /// `None`; the source's shared line's new head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landing {

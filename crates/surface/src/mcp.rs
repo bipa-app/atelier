@@ -159,6 +159,10 @@ pub(crate) fn dispatch(
             Ok(request_json(&request))
         }
         "land" => Ok(outcome_json(&workspace.land(session_id(args)?)?)),
+        "undo" => {
+            let id = request_id(args)?;
+            Ok(undo_json(id, &workspace.undo(id)?))
+        }
         "landing_requests" => {
             let requests: Vec<Value> = workspace
                 .landing_requests()?
@@ -172,13 +176,7 @@ pub(crate) fn dispatch(
             let entries: Vec<Value> = workspace.journal(limit)?.iter().map(entry_json).collect();
             Ok(json!({"entries": entries}))
         }
-        "abandon" => {
-            let session = workspace.abandon(session_id(args)?)?;
-            Ok(json!({
-                "session_id": session.id.to_string(),
-                "state": session.state.as_str(),
-            }))
-        }
+        "abandon" => Ok(session_state_json(&workspace.abandon(session_id(args)?)?)),
         _ => Err(ToolFailure::UnknownTool),
     }
 }
@@ -200,6 +198,24 @@ fn instruction_args(args: &Value) -> Result<Instruction, ToolFailure> {
         run_ref: optional_str(args, "instruction_run_ref")?.map(str::to_owned),
         verbatim: optional_str(args, "instruction_verbatim")?.map(str::to_owned),
     })
+}
+
+/// A session's identity and state as the wire carries them.
+fn session_state_json(session: &atelier_core::Session) -> Value {
+    json!({
+        "session_id": session.id.to_string(),
+        "state": session.state.as_str(),
+    })
+}
+
+/// An undo as the wire carries it: the re-opened request and each line's
+/// restored head, `null` source naming the root.
+fn undo_json(id: atelier_core::RequestId, restores: &[atelier_core::Restore]) -> Value {
+    let lines: Vec<Value> = restores
+        .iter()
+        .map(|restore| json!({"source": restore.source, "head": restore.head}))
+        .collect();
+    json!({"request_id": id.to_string(), "state": "open", "restored": lines})
 }
 
 /// A windowed read as the wire carries it: content, window, continuation.
@@ -473,9 +489,19 @@ fn session_tools() -> Vec<Value> {
     ]
 }
 
-/// The gate verbs: how a change asks to land and who lets it.
+/// The gate verbs: how a change asks to land and who lets it — and how
+/// a landing steps back.
 fn gate_tools() -> Vec<Value> {
     vec![
+        json!({
+            "name": "undo",
+            "description": "Step a landed request back off every line it landed; the request re-opens with approvals dismissed and the session holds its change again (ADR-0011).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"request_id": {"type": "string"}},
+                "required": ["request_id"]
+            }
+        }),
         json!({
             "name": "request_land",
             "description": "Open the session's landing request. The change lands once the request's gate is satisfied; landing is never a direct write.",

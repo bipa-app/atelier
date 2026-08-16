@@ -71,6 +71,17 @@ pub(crate) enum Side {
     Blob(FileBlob),
 }
 
+/// What one undo attempt did to the shared line (ADR-0011).
+pub(crate) enum StepBack {
+    /// The line stepped back off the landed snapshot to `restored`.
+    Stepped { restored: String },
+    /// The line already sits on the landed snapshot's parent: a prior
+    /// attempt stepped it; nothing to do.
+    AlreadyStepped,
+    /// The line moved past the landing; `head` is what sits on it now.
+    LineMoved { head: String },
+}
+
 /// What one landing attempt did to the shared line.
 pub(crate) enum LandOutcome {
     Landed {
@@ -471,6 +482,66 @@ impl Engine {
             .map_err(engine_err)?;
         Ok(LandOutcome::Landed {
             snapshot: rebased.id().hex(),
+        })
+    }
+
+    /// Step the line back off `landed` to its parent (ADR-0011): the
+    /// working copy, the colocated git HEAD, and the bookmark all return;
+    /// the landed snapshot stays in history. The caller holds the landing
+    /// lease. Idempotent by outcome: a line already stepped says so, a
+    /// line that moved past the landing refuses with its head.
+    pub fn step_back(&mut self, landed: &str, bookmark: &str) -> Result<StepBack, Error> {
+        block_on(self.step_back_async(landed, bookmark))
+    }
+
+    async fn step_back_async(&mut self, landed: &str, bookmark: &str) -> Result<StepBack, Error> {
+        let name = self.jj.workspace_name().to_owned();
+        let head = self.wc_commit_id()?;
+        let landed_commit = self.commit_at(landed)?;
+        let Some(parent_id) = landed_commit.parent_ids().first() else {
+            return Err(Error::Engine(format!(
+                "the landed snapshot {landed} has no parent to step back to"
+            )));
+        };
+        if head == *parent_id {
+            return Ok(StepBack::AlreadyStepped);
+        }
+        if head.hex() != landed {
+            return Ok(StepBack::LineMoved { head: head.hex() });
+        }
+        let parent = self
+            .repo
+            .store()
+            .get_commit(parent_id)
+            .map_err(engine_err)?;
+        let mut tx = self.repo.start_transaction();
+        tx.repo_mut()
+            .set_wc_commit(name, parent_id.clone())
+            .map_err(engine_err)?;
+        // The line stepped back; HEAD and the bookmark follow so plain git
+        // never publishes the undone head as the newest state.
+        git::reset_head(tx.repo_mut(), &parent)
+            .await
+            .map_err(engine_err)?;
+        tx.repo_mut().set_local_bookmark_target(
+            RefName::new(bookmark),
+            RefTarget::normal(parent_id.clone()),
+        );
+        let exported = git::export_refs(tx.repo_mut()).map_err(engine_err)?;
+        if !exported.failed_bookmarks.is_empty() {
+            return Err(Error::Engine(format!(
+                "bookmark {bookmark:?} failed to export: {:?}",
+                exported.failed_bookmarks
+            )));
+        }
+        let repo = tx.commit("undo").await.map_err(engine_err)?;
+        self.repo = repo;
+        self.jj
+            .check_out(self.repo.op_id().clone(), None, &parent)
+            .await
+            .map_err(engine_err)?;
+        Ok(StepBack::Stepped {
+            restored: parent_id.hex(),
         })
     }
 
