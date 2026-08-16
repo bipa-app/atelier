@@ -74,8 +74,13 @@ struct HttpServer {
 
 impl HttpServer {
     fn spawn(config_home: &Path, workspace: &Path) -> Self {
+        Self::spawn_with(config_home, workspace, &[])
+    }
+
+    fn spawn_with(config_home: &Path, workspace: &Path, extra_args: &[&str]) -> Self {
         let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
             .args(["serve", "--http", "--bind", "127.0.0.1:0"])
+            .args(extra_args)
             .env("ATELIER_CONFIG_HOME", config_home)
             .current_dir(workspace)
             .stdout(Stdio::piped())
@@ -96,10 +101,24 @@ impl HttpServer {
     /// One HTTP round trip, hand-rolled over a socket: one request per
     /// connection needs no client stack.
     fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+        self.request_as(method, path, body, None)
+    }
+
+    /// The same round trip, optionally carrying an Authorization header.
+    fn request_as(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        bearer: Option<&str>,
+    ) -> (u16, String) {
+        let authorization = bearer.map_or(String::new(), |token| {
+            format!("Authorization: Bearer {token}\r\n")
+        });
         let mut stream = TcpStream::connect(&self.address).expect("connect to the server");
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.address,
             body.len(),
         )
@@ -421,9 +440,24 @@ fn a_bind_beyond_loopback_needs_the_explicit_flag() {
         .failure()
         .stderr(predicate::str::contains("pass --allow-remote to mean it"));
 
-    // With the flag the same bind starts and announces itself.
-    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
+    // The flag alone is not enough: beyond loopback a token is mandatory.
+    ws(config_home.path(), workspace.path())
         .args(["serve", "--http", "--bind", "0.0.0.0:0", "--allow-remote"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --token"));
+
+    // With the flag and a token the same bind starts and announces itself.
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
+        .args([
+            "serve",
+            "--http",
+            "--bind",
+            "0.0.0.0:0",
+            "--allow-remote",
+            "--token",
+            "hush",
+        ])
         .env("ATELIER_CONFIG_HOME", config_home.path())
         .current_dir(workspace.path())
         .stdout(Stdio::piped())
@@ -610,4 +644,114 @@ fn rest_sessions_take_mount_scoped_paths_unchanged_in_shape() {
         "M app/main.rs\n-fn main() {}\n+fn main() { run() }"
     );
     server.kill();
+}
+
+#[test]
+fn rest_speaks_every_verb_the_tools_speak() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+    fs::write(workspace.path().join("notes.txt"), "hello\n").expect("write base file");
+    let server = HttpServer::spawn(config_home.path(), workspace.path());
+
+    // The read models arrive as the exact text the CLI prints.
+    let (status, manifest) = server.request("GET", "/v1/manifest", "");
+    assert_eq!(status, 200);
+    assert!(manifest.starts_with("workspace: "), "got: {manifest}");
+    let (status, state) = server.request("GET", "/v1/status", "");
+    assert_eq!(status, 200);
+    assert!(state.starts_with("head: "), "got: {state}");
+
+    // One session through the whole gate, REST alone.
+    let session = server.json(
+        "POST",
+        "/v1/sessions",
+        &json!({
+            "actor_name": "rest-agent", "actor_kind": "agent",
+            "instruction_summary": "revise the notes over rest",
+        }),
+    );
+    assert_eq!(session["session_id"], "s1");
+    let (status, _) = server.request("PUT", "/v1/sessions/s1/files/notes.txt", "hello\nworld\n");
+    assert_eq!(status, 200);
+    let read = server.json(
+        "GET",
+        "/v1/sessions/s1/files/notes.txt?max_bytes=6",
+        &json!({}),
+    );
+    assert_eq!(read["content"], "hello\n");
+    assert_eq!(read["next"], 6);
+    let request = server.json("POST", "/v1/sessions/s1/request-land", &json!({}));
+    assert_eq!(request["request_id"], "r1");
+    assert_eq!(request["state"], "open");
+    let requests = server.json("GET", "/v1/requests", &json!({}));
+    assert_eq!(requests["requests"][0]["request_id"], "r1");
+    let outcome = server.json(
+        "POST",
+        "/v1/requests/r1/approve",
+        &json!({"actor_name": "approver", "actor_kind": "human"}),
+    );
+    assert_eq!(outcome["state"], "landed");
+
+    // A second session rejects; a third abandons.
+    server.json(
+        "POST",
+        "/v1/sessions",
+        &json!({
+            "actor_name": "rest-agent", "actor_kind": "agent",
+            "instruction_summary": "a change to refuse",
+        }),
+    );
+    let (status, _) = server.request("PUT", "/v1/sessions/s2/files/notes.txt", "noise\n");
+    assert_eq!(status, 200);
+    server.json("POST", "/v1/sessions/s2/request-land", &json!({}));
+    let rejected = server.json(
+        "POST",
+        "/v1/requests/r2/reject",
+        &json!({"reason": "not like this"}),
+    );
+    assert_eq!(rejected["state"], "rejected");
+    server.json(
+        "POST",
+        "/v1/sessions",
+        &json!({
+            "actor_name": "rest-agent", "actor_kind": "agent",
+            "instruction_summary": "a change to walk away from",
+        }),
+    );
+    let abandoned = server.json("POST", "/v1/sessions/s3/abandon", &json!({}));
+    assert_eq!(abandoned["state"], "abandoned");
+
+    server.kill();
+}
+
+#[test]
+fn http_auth_refuses_without_the_token() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+    let server = HttpServer::spawn_with(config_home.path(), workspace.path(), &["--token", "hush"]);
+
+    // No token, wrong token: 401 on both faces. The right one: 200.
+    let (status, body) = server.request("GET", "/v1/status", "");
+    assert_eq!(status, 401, "got: {body}");
+    let (status, _) = server.request_as("GET", "/v1/status", "", Some("wrong"));
+    assert_eq!(status, 401);
+    let (status, _) = server.request_as("POST", "/mcp", "{}", None);
+    assert_eq!(status, 401);
+    let (status, body) = server.request_as("GET", "/v1/status", "", Some("hush"));
+    assert_eq!(status, 200);
+    assert!(body.starts_with("head: "), "got: {body}");
+    server.kill();
+
+    // Beyond loopback, a token is not optional: the server refuses to start.
+    let refused = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
+        .args(["serve", "--http", "--bind", "0.0.0.0:0", "--allow-remote"])
+        .env("ATELIER_CONFIG_HOME", config_home.path())
+        .current_dir(workspace.path())
+        .output()
+        .expect("run atelier serve");
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8(refused.stderr).expect("stderr is utf-8");
+    assert!(stderr.contains("requires --token"), "got: {stderr}");
 }
