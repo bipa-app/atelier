@@ -1,3 +1,6 @@
+//! The workspace core end to end: init, attach, auto-snapshot, the
+//! fidelity ladder rung by rung, and every journaled degradation act.
+
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::Path;

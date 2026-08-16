@@ -1,3 +1,11 @@
+//! Sessions and the landing gate: every legal transition lands and each
+//! illegal one refuses by name — open, request, approve, reject, park,
+//! abandon, and the races between them.
+#![expect(
+    clippy::too_many_lines,
+    reason = "a test tells one story end to end; fragmenting it would hide the transition being pinned"
+)]
+
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};

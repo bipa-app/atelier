@@ -1,3 +1,6 @@
+//! The rich docx differ: what markdown cannot express arrives as scoped
+//! delta lines — exact output pinned, distinct inputs pinned distinct.
+
 use std::io::{Cursor, Write};
 
 use atelier_diff_core::{DeltaKind, Fidelity, FormatPackage};

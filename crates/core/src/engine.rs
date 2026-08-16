@@ -19,23 +19,25 @@ use jj_lib::repo_path::RepoPath;
 use jj_lib::rewrite::rebase_commit;
 use jj_lib::settings::UserSettings;
 use jj_lib::working_copy::SnapshotOptions;
-use jj_lib::workspace::Workspace as JjWorkspace;
+use jj_lib::workspace::{LockedWorkspace, Workspace as JjWorkspace};
 use pollster::block_on;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::Actor;
 use crate::error::{Error, config_err, engine_err};
 use crate::workspace::SKIP_NAMES;
 
-const MAX_NEW_FILE_SIZE: u64 = 50 * 1024 * 1024;
+const NEW_FILE_SIZE_MAX: u64 = 50 * 1024 * 1024;
 
 /// The largest file the ladder loads to raise its fidelity. Bigger files
 /// stay at the binary rung — their deltas are still listed, just not
 /// projected or line-diffed — and the caller journals the degradation.
-pub(crate) const MAX_LADDER_FILE_SIZE: u64 = 8 * 1024 * 1024;
+pub(crate) const LADDER_FILE_SIZE_MAX: u64 = 8 * 1024 * 1024;
+// The ladder only ever re-reads files a snapshot accepted.
+const _: () = assert!(LADDER_FILE_SIZE_MAX <= NEW_FILE_SIZE_MAX);
 
 /// One immutable whole-workspace state in history, attributed to an actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +65,7 @@ pub(crate) struct FileBlob {
 pub(crate) enum Side {
     /// The path is absent or not a plain file on this side.
     Absent,
-    /// The file exceeds [`MAX_LADDER_FILE_SIZE`]; its delta stays at the
+    /// The file exceeds [`LADDER_FILE_SIZE_MAX`]; its delta stays at the
     /// binary rung and the caller journals the degradation.
     TooLarge,
     Blob(FileBlob),
@@ -88,7 +90,7 @@ enum SnapshotStyle {
 
 /// The jj-backed engine: the only place jj types are allowed to appear.
 pub(crate) struct Engine {
-    ws: JjWorkspace,
+    jj: JjWorkspace,
     repo: Arc<ReadonlyRepo>,
     _settings: UserSettings,
     /// Mount names outside this engine's world: never snapshotted as its
@@ -101,14 +103,14 @@ impl Engine {
     /// the `boundary` names are outside this engine's world.
     pub fn init(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
         let settings = build_settings(actor)?;
-        let (ws, repo) = block_on(JjWorkspace::init_colocated_git(
+        let (jj, repo) = block_on(JjWorkspace::init_colocated_git(
             &settings,
             root,
             gix_hash::Kind::Sha1,
         ))
         .map_err(engine_err)?;
         Ok(Self {
-            ws,
+            jj,
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
@@ -118,16 +120,16 @@ impl Engine {
     /// Load the workspace store already present at `root`.
     pub fn open(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
         let settings = build_settings(actor)?;
-        let ws = JjWorkspace::load(
+        let jj = JjWorkspace::load(
             &settings,
             root,
             &default_backend_factories(),
             &default_working_copy_factories(),
         )
         .map_err(engine_err)?;
-        let repo = block_on(ws.repo_loader().load_at_head()).map_err(engine_err)?;
+        let repo = block_on(jj.repo_loader().load_at_head()).map_err(engine_err)?;
         Ok(Self {
-            ws,
+            jj,
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
@@ -138,7 +140,7 @@ impl Engine {
     /// processes (the CLI beside a server) committed since this handle
     /// loaded.
     pub fn refresh(&mut self) -> Result<(), Error> {
-        self.repo = block_on(self.ws.repo_loader().load_at_head()).map_err(engine_err)?;
+        self.repo = block_on(self.jj.repo_loader().load_at_head()).map_err(engine_err)?;
         Ok(())
     }
 
@@ -156,7 +158,7 @@ impl Engine {
         boundary: &[String],
     ) -> Result<Self, Error> {
         let settings = build_settings(actor)?;
-        let (mut ws, repo) = JjWorkspace::init_external_git(&settings, root, &root.join(".git"))
+        let (mut jj, repo) = JjWorkspace::init_external_git(&settings, root, &root.join(".git"))
             .await
             .map_err(engine_err)?;
         let mut tx = repo.start_transaction();
@@ -170,7 +172,7 @@ impl Engine {
             .await
             .map_err(engine_err)?;
         let head = tx.repo_mut().view().git_head().as_normal().cloned();
-        let name = ws.workspace_name().to_owned();
+        let name = jj.workspace_name().to_owned();
         let wc_commit = match head {
             // The working copy continues the adopted history: HEAD's tree,
             // HEAD as parent.
@@ -206,12 +208,12 @@ impl Engine {
         }
         let repo = tx.commit("adopt git repo").await.map_err(engine_err)?;
         if let Some(wc_commit) = &wc_commit {
-            ws.check_out(repo.op_id().clone(), None, wc_commit)
+            jj.check_out(repo.op_id().clone(), None, wc_commit)
                 .await
                 .map_err(engine_err)?;
         }
         Ok(Self {
-            ws,
+            jj,
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
@@ -231,22 +233,15 @@ impl Engine {
     }
 
     async fn snapshot_with(&mut self, style: &SnapshotStyle) -> Result<Option<String>, Error> {
-        let name = self.ws.workspace_name().to_owned();
+        let name = self.jj.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
             None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
-        let base_ignores = base_ignores(&self.boundary)?;
-        let options = SnapshotOptions {
-            base_ignores,
-            progress: None,
-            start_tracking_matcher: &EverythingMatcher,
-            force_tracking_matcher: &NothingMatcher,
-            max_new_file_size: MAX_NEW_FILE_SIZE,
-        };
+        let options = snapshot_options(base_ignores(&self.boundary)?);
 
         let mut locked = self
-            .ws
+            .jj
             .start_working_copy_mutation()
             .await
             .map_err(engine_err)?;
@@ -254,14 +249,12 @@ impl Engine {
         let (new_tree, stats) = match locked.locked_wc().snapshot(&options).await {
             Ok(result) => result,
             Err(err) => {
-                let op = locked.locked_wc().old_operation_id().clone();
-                locked.finish(op).await.map_err(engine_err)?;
+                release_at_old_operation(locked).await?;
                 return Err(engine_err(err));
             }
         };
         if !stats.invalid_utf8_paths.is_empty() {
-            let op = locked.locked_wc().old_operation_id().clone();
-            locked.finish(op).await.map_err(engine_err)?;
+            release_at_old_operation(locked).await?;
             return Err(Error::Engine(
                 "working copy has paths with invalid utf-8 names".to_owned(),
             ));
@@ -269,8 +262,7 @@ impl Engine {
 
         let wc_commit = self.repo.store().get_commit(&wc_id).map_err(engine_err)?;
         if new_tree.tree_ids() == wc_commit.tree_ids() {
-            let op = locked.locked_wc().old_operation_id().clone();
-            locked.finish(op).await.map_err(engine_err)?;
+            release_at_old_operation(locked).await?;
             return Ok(None);
         }
 
@@ -319,7 +311,7 @@ impl Engine {
 
     /// The ancestor chain of the working-copy commit, newest first.
     pub fn log(&self, limit: usize) -> Result<Vec<Snapshot>, Error> {
-        let name = self.ws.workspace_name().to_owned();
+        let name = self.jj.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
             None => return Err(Error::Engine("no working-copy commit".to_owned())),
@@ -392,7 +384,7 @@ impl Engine {
         fs::create_dir_all(root)?;
         let (mut session_ws, repo) = JjWorkspace::init_workspace_with_existing_repo(
             root,
-            self.ws.repo_path(),
+            self.jj.repo_path(),
             &self.repo,
             &*default_working_copy_factory(),
             WorkspaceNameBuf::from(name),
@@ -435,7 +427,7 @@ impl Engine {
     }
 
     async fn land_async(&mut self, tip: &str, bookmark: &str) -> Result<LandOutcome, Error> {
-        let name = self.ws.workspace_name().to_owned();
+        let name = self.jj.workspace_name().to_owned();
         let head_id = self.wc_commit_id()?;
         let tip_commit = self.commit_at(tip)?;
         let mut tx = self.repo.start_transaction();
@@ -473,7 +465,7 @@ impl Engine {
         }
         let repo = tx.commit("land").await.map_err(engine_err)?;
         self.repo = repo;
-        self.ws
+        self.jj
             .check_out(self.repo.op_id().clone(), None, &rebased)
             .await
             .map_err(engine_err)?;
@@ -498,7 +490,7 @@ impl Engine {
     }
 
     fn wc_commit_id(&self) -> Result<CommitId, Error> {
-        let name = self.ws.workspace_name().to_owned();
+        let name = self.jj.workspace_name().to_owned();
         match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => Ok(id.clone()),
             None => Err(Error::Engine("no working-copy commit".to_owned())),
@@ -519,7 +511,7 @@ impl Engine {
     }
 
     async fn diff_latest_async(&self) -> Result<(Diff, DiffSides), Error> {
-        let name = self.ws.workspace_name().to_owned();
+        let name = self.jj.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
             None => return Err(Error::Engine("no working-copy commit".to_owned())),
@@ -583,11 +575,11 @@ impl Engine {
             .map_err(engine_err)?;
         let mut bytes = Vec::new();
         reader
-            .take(MAX_LADDER_FILE_SIZE + 1)
+            .take(LADDER_FILE_SIZE_MAX + 1)
             .read_to_end(&mut bytes)
             .await
             .map_err(engine_err)?;
-        if bytes.len() as u64 > MAX_LADDER_FILE_SIZE {
+        if bytes.len() as u64 > LADDER_FILE_SIZE_MAX {
             return Ok(Side::TooLarge);
         }
         Ok(Side::Blob(FileBlob {
@@ -691,7 +683,7 @@ impl Engine {
             kept.insert(rel);
         }
         drop(stream);
-        remove_unkept(dest, dest, &kept)
+        remove_unkept(dest, &kept)
     }
 
     fn empty_tree(&self) -> Result<MergedTree, Error> {
@@ -740,6 +732,26 @@ fn signature(actor: &Actor) -> Signature {
 /// The engine's boundary as one virtual root .gitignore: its own internals
 /// plus the mount names it must never version (anchored, so a nested
 /// directory that merely shares a mount's name stays content).
+/// Release a locked working copy at the operation it started from: the
+/// snapshot found nothing to write, or refused.
+async fn release_at_old_operation(mut locked: LockedWorkspace<'_>) -> Result<(), Error> {
+    let operation = locked.locked_wc().old_operation_id().clone();
+    locked.finish(operation).await.map_err(engine_err)?;
+    Ok(())
+}
+
+/// How every snapshot walks the working copy: track everything inside the
+/// boundary, force nothing, refuse files past the snapshot cap.
+fn snapshot_options(base_ignores: Arc<GitIgnoreFile>) -> SnapshotOptions<'static> {
+    SnapshotOptions {
+        base_ignores,
+        progress: None,
+        start_tracking_matcher: &EverythingMatcher,
+        force_tracking_matcher: &NothingMatcher,
+        max_new_file_size: NEW_FILE_SIZE_MAX,
+    }
+}
+
 fn base_ignores(boundary: &[String]) -> Result<Arc<GitIgnoreFile>, Error> {
     let mut rules = String::from(".atelier/\n.git/\n.jj/\n");
     for name in boundary {
@@ -755,36 +767,47 @@ fn base_ignores(boundary: &[String]) -> Result<Arc<GitIgnoreFile>, Error> {
 /// Remove everything under `dir` the exported tree lacks, skipping the
 /// engine-internal names at any depth; empty directories vanish with
 /// their contents. `root` anchors the tree-relative paths in `kept`.
-fn remove_unkept(root: &Path, dir: &Path, kept: &BTreeSet<String>) -> Result<(), Error> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Err(Error::Engine(format!(
-                "cannot mirror over a non-utf8 name at {}",
-                entry.path().display()
-            )));
-        };
-        if SKIP_NAMES.contains(&name) {
-            continue;
+fn remove_unkept(root: &Path, kept: &BTreeSet<String>) -> Result<(), Error> {
+    // An explicit work stack bounds the walk by entry count, never call
+    // depth; directories prune deepest-first so an emptied child empties
+    // its parent in turn.
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(Error::Engine(format!(
+                    "cannot mirror over a non-utf8 name at {}",
+                    entry.path().display()
+                )));
+            };
+            if SKIP_NAMES.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                directories.push(path.clone());
+                pending.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .map_err(engine_err)?
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if !kept.contains(&rel) {
+                    fs::remove_file(&path)?;
+                }
+            }
         }
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            remove_unkept(root, &path, kept)?;
-            if fs::read_dir(&path)?.next().is_none() {
-                fs::remove_dir(&path)?;
-            }
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(engine_err)?
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            if !kept.contains(&rel) {
-                fs::remove_file(&path)?;
-            }
+    }
+    directories.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in directories {
+        if fs::read_dir(&dir)?.next().is_none() {
+            fs::remove_dir(&dir)?;
         }
     }
     Ok(())

@@ -1,3 +1,11 @@
+//! Mounted sources: per-source engines and histories, git adoption,
+//! boundary isolation, the fan-out landing with per-source parking, the
+//! manifest, and bookmark motion on landing.
+#![expect(
+    clippy::too_many_lines,
+    reason = "a test tells one story end to end; fragmenting it would hide the transition being pinned"
+)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;

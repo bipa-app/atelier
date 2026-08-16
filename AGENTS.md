@@ -4,8 +4,9 @@ atelier is the workspace substrate agents and humans do real work in. Its produc
 diff you cannot trust is worse than no diff. These rules are **MANDATORY**.
 
 Read before touching code: [`CONTEXT.md`](CONTEXT.md) (the vocabulary — use these words, avoid
-the listed synonyms), [`docs/api.md`](docs/api.md) (behavior contracts and edge-case rulings),
-[`docs/adr/`](docs/adr/) (decisions and why), the active plan in [`plans/`](plans/).
+the listed synonyms), [`docs/style.md`](docs/style.md) (every Tiger Style rule, ruled: adopted,
+adapted, or rejected — with why), [`docs/api.md`](docs/api.md) (behavior contracts and edge-case
+rulings), [`docs/adr/`](docs/adr/) (decisions and why), the active plan in [`plans/`](plans/).
 
 ## Contracts (the product's laws)
 
