@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::config::{Actor, ActorKind};
+use crate::config::{Actor, ActorKind, ROOT_MOUNT};
 use crate::error::{Error, engine_err};
 use crate::landing::RequestState;
 use crate::session::SessionState;
@@ -267,6 +267,44 @@ impl Coordination {
         Ok(moved == 1)
     }
 
+    /// Record one source's landing under the request — the fact a re-apply
+    /// after a park must not repeat. The root records as `/`.
+    pub fn record_landing(
+        &self,
+        request_id: i64,
+        source: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT INTO request_landings (request_id, source, snapshot_id)
+                 VALUES (?1, ?2, ?3)",
+                params![request_id, source.unwrap_or(ROOT_MOUNT), snapshot_id],
+            )
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
+    /// The request's recorded landings: source (`None` for the root) and
+    /// the snapshot it landed, in source order.
+    pub fn landings(&self, request_id: i64) -> Result<Vec<(Option<String>, String)>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source, snapshot_id FROM request_landings
+                 WHERE request_id = ?1 ORDER BY source",
+            )
+            .map_err(engine_err)?;
+        let rows = stmt
+            .query_map(params![request_id], |row| {
+                let source: String = row.get(0)?;
+                let snapshot: String = row.get(1)?;
+                Ok(((source != ROOT_MOUNT).then_some(source), snapshot))
+            })
+            .map_err(engine_err)?;
+        collect(rows)
+    }
+
     pub fn add_approval(
         &self,
         request_id: i64,
@@ -420,6 +458,33 @@ mod tests {
             name: "test-actor".to_owned(),
             kind: ActorKind::Human,
         }
+    }
+
+    #[test]
+    fn landing_points_are_per_source() {
+        let (_dir, coordination) = coordination();
+
+        // Distinct sources' points never contend: two holders claim two
+        // mounts' landing points at once.
+        assert!(matches!(
+            coordination
+                .claim_lease("landing/aa", "one", 0, 1000)
+                .unwrap(),
+            LeaseClaim::Held
+        ));
+        assert!(matches!(
+            coordination
+                .claim_lease("landing/bb", "two", 0, 1000)
+                .unwrap(),
+            LeaseClaim::Held
+        ));
+        // One source's point still admits exactly one holder.
+        assert!(matches!(
+            coordination
+                .claim_lease("landing/aa", "two", 0, 1000)
+                .unwrap(),
+            LeaseClaim::HeldByOther { .. }
+        ));
     }
 
     #[test]

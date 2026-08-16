@@ -272,7 +272,7 @@ fn an_mcp_http_client_runs_the_full_session_loop() {
 
     let landed = server.call(5, "land", &json!({"session_id": "s1"}));
     assert_eq!(landed["state"], "landed");
-    let snapshot = landed["snapshot_id"]
+    let snapshot = landed["landings"][0]["snapshot_id"]
         .as_str()
         .expect("landed snapshot id")
         .to_owned();
