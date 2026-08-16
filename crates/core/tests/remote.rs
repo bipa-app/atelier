@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use atelier_core::{
-    Act, Actor, ActorKind, Error, GateOutcome, Instruction, SyncOutcome, Workspace,
+    Act, Actor, ActorKind, Error, GateOutcome, Instruction, PullOutcome, SyncOutcome, Workspace,
 };
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
@@ -228,5 +228,127 @@ fn remote_refusals_speak_by_name() {
     assert_eq!(
         fs::read_to_string(clean.path().join("a.md")).unwrap(),
         "a\n"
+    );
+}
+
+#[test]
+fn a_pull_folds_bucket_changes_into_the_line() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let bucket = tempfile::tempdir().unwrap();
+    fs::write(bucket.path().join("keep.md"), "kept\n").unwrap();
+    fs::write(bucket.path().join("old.md"), "old\n").unwrap();
+    ws.attach_remote(&bucket_url(bucket.path()), "docs")
+        .unwrap();
+
+    // Nothing changed yet: the pull says so and moves nothing.
+    assert_eq!(ws.pull(Some("docs")).unwrap(), PullOutcome::Current);
+
+    // A colleague updates, adds, and removes objects.
+    fs::write(bucket.path().join("keep.md"), "kept, revised\n").unwrap();
+    fs::write(bucket.path().join("new.md"), "brand new\n").unwrap();
+    fs::remove_file(bucket.path().join("old.md")).unwrap();
+
+    let outcome = ws.pull(Some("docs")).unwrap();
+    let PullOutcome::Pulled { snapshot } = outcome else {
+        panic!("the pull must fold, got {outcome:?}");
+    };
+
+    // The mount's line advanced to the bucket's state, one attributed act.
+    assert_eq!(
+        fs::read_to_string(root.path().join("docs").join("keep.md")).unwrap(),
+        "kept, revised\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("docs").join("new.md")).unwrap(),
+        "brand new\n"
+    );
+    assert!(!root.path().join("docs").join("old.md").exists());
+    let pulls: Vec<String> = ws
+        .journal(50)
+        .expect("read the journal")
+        .into_iter()
+        .filter(|entry| entry.act == Act::Pull)
+        .map(|entry| entry.reference.unwrap_or_default())
+        .collect();
+    assert_eq!(pulls, vec![format!("docs {snapshot}")]);
+
+    // The fingerprint stayed coherent: the full cycle keeps working.
+    // pull -> session -> land mirrors home with no park.
+    let session = ws.open_session(&actor(), &instruction()).unwrap();
+    ws.session_write(session.id, "docs/keep.md", "kept, landed\n")
+        .unwrap();
+    let outcome = ws.land(session.id).unwrap();
+    assert!(matches!(outcome, GateOutcome::Landed { .. }), "{outcome:?}");
+    assert_eq!(
+        fs::read_to_string(bucket.path().join("keep.md")).unwrap(),
+        "kept, landed\n"
+    );
+    let parked = ws
+        .journal(50)
+        .expect("read the journal")
+        .into_iter()
+        .filter(|entry| entry.act == Act::SyncParked)
+        .count();
+    assert_eq!(parked, 0);
+    assert_eq!(ws.pull(Some("docs")).unwrap(), PullOutcome::Current);
+}
+
+#[test]
+fn a_pull_refuses_local_line_movement_by_name() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let bucket = tempfile::tempdir().unwrap();
+    fs::write(bucket.path().join("doc.md"), "v1\n").unwrap();
+    ws.attach_remote(&bucket_url(bucket.path()), "docs")
+        .unwrap();
+
+    // The bucket moves - and so does the local line, out-of-band: the
+    // pull's own auto-snapshot captures the local edit as line movement.
+    fs::write(bucket.path().join("doc.md"), "the colleague's v2\n").unwrap();
+    fs::write(root.path().join("docs").join("doc.md"), "a local edit\n").unwrap();
+
+    let error = ws.pull(Some("docs")).unwrap_err();
+    assert!(
+        matches!(&error, Error::Config(message) if message.contains("moved locally since its last sync")),
+        "got: {error:?}"
+    );
+    // Nothing was pulled over the local edit; both states survive.
+    assert_eq!(
+        fs::read_to_string(root.path().join("docs").join("doc.md")).unwrap(),
+        "a local edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(bucket.path().join("doc.md")).unwrap(),
+        "the colleague's v2\n"
+    );
+
+    // Landing the local movement re-parks against the moved bucket (the
+    // sync guard), force reconciles, and then the pull is current.
+    let session = ws.open_session(&actor(), &instruction()).unwrap();
+    ws.session_write(session.id, "docs/doc.md", "a local edit, landed\n")
+        .unwrap();
+    let outcome = ws.land(session.id).unwrap();
+    assert!(matches!(outcome, GateOutcome::Landed { .. }), "{outcome:?}");
+    let forced = ws.sync(Some("docs"), true).unwrap();
+    assert!(matches!(forced, SyncOutcome::Synced { .. }), "{forced:?}");
+    assert_eq!(ws.pull(Some("docs")).unwrap(), PullOutcome::Current);
+
+    // Non-remote sources refuse the verb by name.
+    let folder = tempfile::tempdir().unwrap();
+    fs::write(folder.path().join("f.txt"), "f\n").unwrap();
+    ws.attach_mount(folder.path(), "files").unwrap();
+    let error = ws.pull(Some("files")).unwrap_err();
+    assert!(
+        matches!(&error, Error::Config(message) if message.contains("not a remote source")),
+        "got: {error:?}"
     );
 }

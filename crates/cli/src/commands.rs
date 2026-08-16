@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use atelier_core::{
-    GateOutcome, JournalEntry, RequestId, SessionId, SyncOutcome, WatchEvent, WatchStop, Workspace,
-    printable, render_diff,
+    GateOutcome, JournalEntry, PullOutcome, RequestId, SessionId, SyncOutcome, WatchEvent,
+    WatchStop, Workspace, printable, render_diff,
 };
 use clap::{Parser, Subcommand};
 
@@ -63,6 +63,9 @@ enum Command {
     /// Step a landed request back off every line it landed; the request
     /// re-opens for a new decision (ADR-0011).
     Undo { request: String },
+    /// Fold bucket-side changes into a mounted remote source's line as one
+    /// attributed snapshot (ADR-0012).
+    Pull { source: Option<String> },
     /// Mirror a folder source's shared line back to its origin; parks when
     /// the origin changed out-of-band (ADR-0010).
     Sync {
@@ -127,6 +130,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
         Command::Land { session } => land(&session),
         Command::Undo { request } => undo(&request),
+        Command::Pull { source } => pull(source.as_deref()),
         Command::Sync { source, force } => sync(source.as_deref(), force),
         Command::Watch { debounce_ms } => watch(debounce_ms),
         Command::Run {
@@ -332,6 +336,17 @@ fn undo(request: &str) -> Result<Vec<String>> {
         .collect();
     lines.push(format!("{id} is open again; approvals dismissed"));
     Ok(lines)
+}
+
+fn pull(source: Option<&str>) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    Ok(vec![match workspace.pull(source)? {
+        PullOutcome::Pulled { snapshot } => match source {
+            Some(name) => format!("pulled {name} {snapshot}"),
+            None => format!("pulled {snapshot}"),
+        },
+        PullOutcome::Current => "already current".to_owned(),
+    }])
 }
 
 fn sync(source: Option<&str>, force: bool) -> Result<Vec<String>> {
