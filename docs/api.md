@@ -111,23 +111,30 @@ oh-my-pi splits two stores on purpose — content-addressed blobs (dedup, global
 - **Structured extraction.** Reads of structured payloads (manifest, journal answers, request lists) accept `extract` — a JSON path/query, omp's `agent://…?q=` idea — so an agent fetches one field, not a document. Extraction and windowing are mutually exclusive, as in omp.
 - **Errors teach the next move.** `AddressNotFound` lists the available outputs and nearest addresses, the way omp's resolvers list available artifact ids on a miss.
 
-## 3. HTTP REST (M5, programmatic face)
+## 3. HTTP (M5, programmatic face) — shipped shape
+
+One process serves one workspace (`ws serve --http`), so paths carry no
+workspace segment. MCP streamable HTTP and REST share the server — and the
+one dispatch behind it.
 
 ```
-POST /v1/workspaces                       init/attach
-GET  /v1/workspaces/{ws}                  status + manifest
-POST /v1/workspaces/{ws}/sessions         open (actor, instruction)
-GET  /v1/workspaces/{ws}/sessions/{s}/files/{path}?start=&limit=&view=   (windowed)
-PUT  /v1/workspaces/{ws}/sessions/{s}/files/{path}
-POST /v1/workspaces/{ws}/sessions/{s}/request-land
-POST /v1/workspaces/{ws}/requests/{r}/approve | /reject
-GET  /v1/workspaces/{ws}/requests?state=open
-POST /v1/workspaces/{ws}/sessions/{s}/abandon
-GET  /v1/workspaces/{ws}/diff?from=&to=&path=
-GET  /v1/workspaces/{ws}/journal?actor=&since=&path=
+POST /mcp                             MCP streamable HTTP: one JSON-RPC message per POST,
+                                      answered as JSON; notifications → 202; GET → 405
+                                      (no server-initiated streams in v1)
+GET  /v1/diff                         the workspace diff, text/plain — the exact lines `ws diff` prints
+POST /v1/sessions                     open (actor, instruction)
+PUT  /v1/sessions/{s}/files/{path}    write; body is the content
+GET  /v1/sessions/{s}/diff
+POST /v1/sessions/{s}/land
+GET  /v1/journal?limit=
 ```
 
-Localhost bind by default; non-localhost needs an explicit flag; auth is a dedicated pre-exposure slice.
+Statuses: 400 broken protocol · 422 domain refusal (`{"error": …}`) · 404/405 routing.
+The remaining sketch endpoints (files read, request-land/approve/reject, abandon, status +
+manifest) arrive with their read models.
+
+Localhost bind by default (`--bind ip:port`); binding beyond loopback requires
+`--allow-remote`; auth is a dedicated pre-exposure slice.
 
 ## 4. CLI (human face)
 

@@ -32,7 +32,7 @@ pub fn serve_stdio(root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_message(workspace: &mut Workspace, line: &str) -> Option<String> {
+pub(crate) fn handle_message(workspace: &mut Workspace, line: &str) -> Option<String> {
     let Ok(message) = serde_json::from_str::<Value>(line) else {
         return Some(error_response(&Value::Null, -32700, "parse error"));
     };
@@ -96,7 +96,7 @@ fn tools_call(workspace: &mut Workspace, id: &Value, params: &Value) -> String {
 /// Why a tool call produced no result: the caller broke the protocol, or
 /// the workspace refused — refusals travel back as tool errors the agent
 /// can act on.
-enum ToolFailure {
+pub(crate) enum ToolFailure {
     UnknownTool,
     BadArguments(String),
     Domain(Error),
@@ -108,7 +108,11 @@ impl From<Error> for ToolFailure {
     }
 }
 
-fn dispatch(workspace: &mut Workspace, tool: &str, args: &Value) -> Result<Value, ToolFailure> {
+pub(crate) fn dispatch(
+    workspace: &mut Workspace,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, ToolFailure> {
     match tool {
         "open_session" => {
             let actor = Actor {

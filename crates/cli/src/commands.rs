@@ -53,6 +53,16 @@ enum Command {
         /// Speak MCP over stdio, one client per process.
         #[arg(long)]
         mcp_stdio: bool,
+        /// Speak MCP streamable HTTP at /mcp and REST under /v1.
+        #[arg(long)]
+        http: bool,
+        /// The ip:port the HTTP server binds.
+        #[arg(long, default_value = "127.0.0.1:7423")]
+        bind: String,
+        /// Allow a bind beyond loopback; auth arrives in a later slice,
+        /// so this exposes the workspace to whoever reaches the address.
+        #[arg(long)]
+        allow_remote: bool,
     },
 }
 
@@ -68,7 +78,12 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
         Command::Watch { debounce_ms } => watch(debounce_ms),
-        Command::Serve { mcp_stdio } => serve(mcp_stdio),
+        Command::Serve {
+            mcp_stdio,
+            http,
+            bind,
+            allow_remote,
+        } => serve(mcp_stdio, http, &bind, allow_remote),
     }
 }
 
@@ -219,12 +234,14 @@ fn watch(debounce_ms: u64) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-fn serve(mcp_stdio: bool) -> Result<Vec<String>> {
-    if !mcp_stdio {
-        bail!("ws serve requires --mcp-stdio; the HTTP transports arrive in a later slice");
-    }
+fn serve(mcp_stdio: bool, http: bool, bind: &str, allow_remote: bool) -> Result<Vec<String>> {
     let root = env::current_dir().context("read the current directory")?;
-    atelier_surface::serve_stdio(&root)?;
+    match (mcp_stdio, http) {
+        (true, false) => atelier_surface::serve_stdio(&root)?,
+        (false, true) => atelier_surface::serve_http(&root, bind, allow_remote)?,
+        (true, true) => bail!("ws serve speaks one transport per process: --mcp-stdio or --http"),
+        (false, false) => bail!("ws serve requires a transport: --mcp-stdio or --http"),
+    }
     Ok(Vec::new())
 }
 

@@ -1,7 +1,9 @@
 //! The agent-facing surfaces: thin shells over the atelier core, never a
-//! second behavior (ADR-0006). v1 serves MCP over stdio; the HTTP
-//! transports are a later slice.
+//! second behavior (ADR-0006). One dispatch serves every transport: MCP
+//! over stdio, MCP over streamable HTTP, and plain REST.
 
+mod http;
 mod mcp;
 
+pub use http::serve_http;
 pub use mcp::serve_stdio;
