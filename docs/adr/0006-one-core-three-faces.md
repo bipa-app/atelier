@@ -1,6 +1,6 @@
 # One core, three faces: SDK first; CLI, MCP, and HTTP are thin shells
 
-atelier ships as a Rust SDK (the core library), an MCP/HTTP server, and the `ws` CLI. The SDK is the product: every capability lands in the library first, and the shells are thin bindings over the same API — no behavior may exist only in a shell. MCP serves agents (stdio locally, streamable HTTP remotely); REST serves plain programmatic clients; the CLI serves humans and scripts.
+atelier ships as a Rust SDK (the core library), an MCP/HTTP server, and the `atelier` CLI. The SDK is the product: every capability lands in the library first, and the shells are thin bindings over the same API — no behavior may exist only in a shell. MCP serves agents (stdio locally, streamable HTTP remotely); REST serves plain programmatic clients; the CLI serves humans and scripts.
 
 ## Considered options
 

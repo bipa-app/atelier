@@ -27,7 +27,7 @@ fn write_actor_config(config_home: &Path) {
 }
 
 fn ws(config_home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::cargo_bin("ws").expect("ws binary builds");
+    let mut command = Command::cargo_bin("atelier").expect("atelier binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -66,7 +66,7 @@ fn read_lines(stdout: ChildStdout) -> Receiver<String> {
     rx
 }
 
-/// A running `ws serve --http` child and the address it landed on.
+/// A running `atelier serve --http` child and the address it landed on.
 struct HttpServer {
     child: Child,
     address: String,
@@ -74,13 +74,13 @@ struct HttpServer {
 
 impl HttpServer {
     fn spawn(config_home: &Path, workspace: &Path) -> Self {
-        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_ws"))
+        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
             .args(["serve", "--http", "--bind", "127.0.0.1:0"])
             .env("ATELIER_CONFIG_HOME", config_home)
             .current_dir(workspace)
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn ws serve --http");
+            .expect("spawn atelier serve --http");
         let lines = read_lines(child.stdout.take().expect("server stdout is piped"));
         let banner = lines
             .recv_timeout(BOUND)
@@ -140,8 +140,8 @@ impl HttpServer {
     }
 
     fn kill(mut self) {
-        self.child.kill().expect("kill ws serve --http");
-        self.child.wait().expect("reap ws serve --http");
+        self.child.kill().expect("kill atelier serve --http");
+        self.child.wait().expect("reap atelier serve --http");
     }
 }
 
@@ -153,7 +153,7 @@ fn decode_tool_result(result: &Value) -> Value {
     serde_json::from_str(text).expect("tool payload is json")
 }
 
-/// A `ws serve --mcp-stdio` child spoken to one JSON-RPC line at a time.
+/// A `atelier serve --mcp-stdio` child spoken to one JSON-RPC line at a time.
 struct StdioClient {
     child: Child,
     stdin: ChildStdin,
@@ -162,14 +162,14 @@ struct StdioClient {
 
 impl StdioClient {
     fn start(config_home: &Path, workspace: &Path) -> Self {
-        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_ws"))
+        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
             .args(["serve", "--mcp-stdio"])
             .env("ATELIER_CONFIG_HOME", config_home)
             .current_dir(workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn ws serve --mcp-stdio");
+            .expect("spawn atelier serve --mcp-stdio");
         let stdin = child.stdin.take().expect("child stdin is piped");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout is piped"));
         Self {
@@ -195,7 +195,7 @@ impl StdioClient {
 
     fn stop(mut self) {
         drop(self.stdin);
-        self.child.wait().expect("reap ws serve --mcp-stdio");
+        self.child.wait().expect("reap atelier serve --mcp-stdio");
     }
 }
 
@@ -282,7 +282,7 @@ fn an_mcp_http_client_runs_the_full_session_loop() {
     // The change is on the shared line, visible to the human face, and
     // the landed content is in the working copy.
     let log = ws(config_home.path(), workspace.path())
-        .arg("log")
+        .arg("history")
         .assert()
         .success();
     let head = stdout_lines(&log).remove(0);
@@ -366,7 +366,7 @@ fn every_transport_records_identical_journal_acts() {
     assert_eq!(stdio_acts, rest_acts);
 }
 
-/// The workspace's journal as `ws journal` renders it, timestamps and
+/// The workspace's journal as `atelier journal` renders it, timestamps and
 /// snapshot ids normalized so runs compare across workspaces.
 fn normalized_journal(config_home: &Path, workspace: &Path) -> Vec<String> {
     let journal = ws(config_home, workspace).arg("journal").assert().success();
@@ -422,13 +422,13 @@ fn a_bind_beyond_loopback_needs_the_explicit_flag() {
         .stderr(predicate::str::contains("pass --allow-remote to mean it"));
 
     // With the flag the same bind starts and announces itself.
-    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_ws"))
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_atelier"))
         .args(["serve", "--http", "--bind", "0.0.0.0:0", "--allow-remote"])
         .env("ATELIER_CONFIG_HOME", config_home.path())
         .current_dir(workspace.path())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("spawn ws serve --http --allow-remote");
+        .expect("spawn atelier serve --http --allow-remote");
     let lines = read_lines(child.stdout.take().expect("server stdout is piped"));
     let banner = lines.recv_timeout(BOUND).expect("the server announces");
     assert!(
