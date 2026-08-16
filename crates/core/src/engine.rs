@@ -12,7 +12,8 @@ use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
-use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::op_store::RefTarget;
+use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::repo_path::RepoPath;
 use jj_lib::rewrite::rebase_commit;
@@ -427,11 +428,11 @@ impl Engine {
     /// Land `tip` onto the shared line: rebase it onto the head, refuse a
     /// conflicted result, else advance the line and the working copy. The
     /// caller holds the landing lease.
-    pub fn land(&mut self, tip: &str) -> Result<LandOutcome, Error> {
-        block_on(self.land_async(tip))
+    pub fn land(&mut self, tip: &str, bookmark: &str) -> Result<LandOutcome, Error> {
+        block_on(self.land_async(tip, bookmark))
     }
 
-    async fn land_async(&mut self, tip: &str) -> Result<LandOutcome, Error> {
+    async fn land_async(&mut self, tip: &str, bookmark: &str) -> Result<LandOutcome, Error> {
         let name = self.ws.workspace_name().to_owned();
         let head_id = self.wc_commit_id()?;
         let tip_commit = self.commit_at(tip)?;
@@ -453,6 +454,21 @@ impl Engine {
         git::reset_head(tx.repo_mut(), &rebased)
             .await
             .map_err(engine_err)?;
+        // The landed line must be pushable with plain git: move the
+        // bookmark to the landed snapshot and export it as a git branch.
+        // The working-copy commit itself never enters a branch, so the
+        // bookmark - not HEAD - is what a push publishes.
+        tx.repo_mut().set_local_bookmark_target(
+            RefName::new(bookmark),
+            RefTarget::normal(rebased.id().clone()),
+        );
+        let exported = git::export_refs(tx.repo_mut()).map_err(engine_err)?;
+        if !exported.failed_bookmarks.is_empty() {
+            return Err(Error::Engine(format!(
+                "bookmark {bookmark:?} failed to export: {:?}",
+                exported.failed_bookmarks
+            )));
+        }
         let repo = tx.commit("land").await.map_err(engine_err)?;
         self.repo = repo;
         self.ws

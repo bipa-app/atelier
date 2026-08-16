@@ -37,6 +37,9 @@ pub(crate) const SKIP_NAMES: [&str; 3] = [".atelier", ".jj", ".git"];
 
 /// The one scarce point of a workspace in v1: its landing point.
 const LANDING_LEASE_POINT: &str = "landing";
+/// The bookmark a landing moves when no adopted branch names one; exported
+/// as a git branch so plain `git push` carries the shared line.
+const LANDED_BOOKMARK: &str = "atelier";
 /// How long a landing lease lives; a holder that dies mid-apply frees the
 /// point when this passes.
 const LANDING_LEASE_TTL_MS: i64 = 30_000;
@@ -61,6 +64,9 @@ pub struct Workspace {
 struct MountedSource {
     name: String,
     engine: Engine,
+    /// The adopted branch landings move; `None` falls back to
+    /// [`LANDED_BOOKMARK`].
+    branch: Option<String>,
 }
 
 impl Workspace {
@@ -116,9 +122,15 @@ impl Workspace {
         let engine = Engine::open(&root, &actor, &mount_names)?;
         let mut mounts = Vec::new();
         for name in &mount_names {
+            let branch = config
+                .sources
+                .iter()
+                .find(|source| source.mount == *name)
+                .and_then(|source| source.branch.clone());
             mounts.push(MountedSource {
                 name: name.clone(),
                 engine: Engine::open(&root.join(name), &actor, &[])?,
+                branch,
             });
         }
         let journal = Journal::open(&control.join(JOURNAL_FILE))?;
@@ -170,6 +182,7 @@ impl Workspace {
             path: folder.to_path_buf(),
             sync: SyncPolicy::TwoWay,
             mount: ROOT_MOUNT.to_owned(),
+            branch: None,
         };
         config.sources.push(source.clone());
         write_workspace_config(&control, &config)?;
@@ -226,12 +239,20 @@ impl Workspace {
             (SourceKind::LocalFolder, engine)
         };
         let snapshot = engine.snapshot()?;
+        // The branch is read from the source itself: the engine detaches
+        // the copy's HEAD as lines move, so only the origin's HEAD names
+        // what the source had checked out.
+        let branch = match kind {
+            SourceKind::LocalGit => adopted_branch(folder)?,
+            SourceKind::LocalFolder => None,
+        };
 
         let source = Source {
             kind,
             path: folder.to_path_buf(),
             sync: SyncPolicy::TwoWay,
             mount: name.to_owned(),
+            branch: branch.clone(),
         };
         config.sources.push(source.clone());
         write_workspace_config(&control, &config)?;
@@ -249,6 +270,7 @@ impl Workspace {
             MountedSource {
                 name: name.to_owned(),
                 engine,
+                branch,
             },
         );
 
@@ -969,14 +991,18 @@ impl Workspace {
         self.refresh_engines()?;
         self.auto_snapshot()?;
         let outcome = match source {
-            None => self.engine.land(tip)?,
+            None => self.engine.land(tip, LANDED_BOOKMARK)?,
             Some(name) => {
                 let index = self
                     .mounts
                     .iter()
                     .position(|mount| mount.name == name)
                     .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
-                self.mounts[index].engine.land(tip)?
+                let bookmark = self.mounts[index]
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
+                self.mounts[index].engine.land(tip, &bookmark)?
             }
         };
         let scoped = |text: &str| match source {
@@ -1572,6 +1598,16 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The branch the adopted repository has checked out: the symbolic ref in
+/// the source's `.git/HEAD`, `None` for a detached head. Landings move this
+/// branch so plain `git push` from the mount carries the shared line.
+fn adopted_branch(source: &Path) -> Result<Option<String>, Error> {
+    let head = fs::read_to_string(source.join(".git").join("HEAD"))?;
+    Ok(head
+        .trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_owned))
+}
 fn folder_uses_lfs(folder: &Path) -> Result<bool, Error> {
     let gitattributes = folder.join(".gitattributes");
     if !gitattributes.is_file() {
