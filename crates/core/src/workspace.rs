@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use atelier_source_remote::RemoteFolder;
 use sha2::{Digest, Sha256};
 
 use atelier_diff_core::{
@@ -54,6 +55,22 @@ pub enum SyncOutcome {
     /// The origin changed out-of-band since the last recorded sync;
     /// nothing was written. `atelier sync --force` overwrites deliberately.
     Parked { snapshot: String },
+}
+
+/// The remote handle was not opened for a remote target: unreachable by
+/// construction in `sync_source`, surfaced as an error because corrupt
+/// control flow must not write anywhere.
+fn unreachable_remote<T>() -> Result<T, Error> {
+    Err(Error::Engine(
+        "sync_source lost its remote handle; this is a bug".to_owned(),
+    ))
+}
+
+/// Where a sync-back writes: a folder origin on this machine, or a
+/// bucket prefix behind the remote adapter (ADR-0012).
+enum SyncTarget {
+    Folder(PathBuf),
+    Remote(String),
 }
 
 /// How long a landing lease lives; a holder that dies mid-apply frees the
@@ -218,37 +235,41 @@ impl Workspace {
     /// history, at `root/<name>` (ADR-0009).
     pub fn attach_mount(&mut self, folder: impl AsRef<Path>, name: &str) -> Result<Source, Error> {
         let folder = folder.as_ref();
+        if !folder.is_dir() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("source folder not found: {}", folder.display()),
+            )));
+        }
         let control = self.root.join(CONTROL_DIR);
         let mut config = read_workspace_config(&control)?;
         let mount_dir = self.root.join(name);
-        attach_refusals(folder, name, &config, &mount_dir)?;
+        mount_refusals(name, &config, &mount_dir)?;
+        if folder_uses_lfs(folder)? {
+            return Err(Error::LfsSourceUnsupported);
+        }
 
         // Settle every engine before the boundary moves.
         self.auto_snapshot()?;
 
-        fs::create_dir_all(&mount_dir)?;
-        // A folder that is already a git repository is adopted, never
-        // imported: its history is preserved and the mount stays a real
-        // repo plain git pushes (ADR-0009).
-        let adopts_git = folder.join(".git").is_dir();
-        let (kind, mut engine) = if adopts_git {
-            copy_tree(folder, &mount_dir, &[".atelier", ".jj"])?;
-            (
-                SourceKind::LocalGit,
-                Engine::adopt_git(&mount_dir, &self.actor, &[])?,
-            )
-        } else {
-            let engine = Engine::init(&mount_dir, &self.actor, &[])?;
-            copy_tree(folder, &mount_dir, &SKIP_NAMES)?;
-            (SourceKind::LocalFolder, engine)
+        let (kind, engine, snapshot) = match self.import_folder(folder, &mount_dir) {
+            Ok(imported) => imported,
+            Err(error) => {
+                // A half-made mount must not squat the name: the refusal
+                // already speaks; a cleanup failure resurfaces as the
+                // collision refusal on retry.
+                let _ = fs::remove_dir_all(&mount_dir);
+                return Err(error);
+            }
         };
-        let snapshot = engine.snapshot()?;
         // The branch is read from the source itself: the engine detaches
         // the copy's HEAD as lines move, so only the origin's HEAD names
         // what the source had checked out.
         let branch = match kind {
             SourceKind::LocalGit => adopted_branch(folder)?,
-            SourceKind::LocalFolder => None,
+            // Remote never occurs here: buckets attach through
+            // attach_remote. Folders carry no branch.
+            SourceKind::LocalFolder | SourceKind::Remote => None,
         };
 
         let source = Source {
@@ -287,8 +308,112 @@ impl Workspace {
                 self.coordination
                     .record_sync_state(name, &fingerprint, &head)?;
             }
-            SourceKind::LocalGit => {}
+            // Remote never occurs here: buckets attach through
+            // attach_remote, which records the listing fingerprint.
+            SourceKind::LocalGit | SourceKind::Remote => {}
         }
+
+        let reference = snapshot.map(|id| format!("{name} {id}"));
+        let entry = self.entry(Act::SourceAttach, reference)?;
+        self.journal.append(&entry)?;
+        Ok(source)
+    }
+
+    /// Copy or adopt `folder` into `mount_dir` with its own engine: a
+    /// folder that is already a git repository is adopted, never imported —
+    /// its history is preserved and the mount stays a real repo plain git
+    /// pushes (ADR-0009).
+    fn import_folder(
+        &self,
+        folder: &Path,
+        mount_dir: &Path,
+    ) -> Result<(SourceKind, Engine, Option<String>), Error> {
+        fs::create_dir_all(mount_dir)?;
+        let adopts_git = folder.join(".git").is_dir();
+        let (kind, mut engine) = if adopts_git {
+            copy_tree(folder, mount_dir, &[".atelier", ".jj"])?;
+            (
+                SourceKind::LocalGit,
+                Engine::adopt_git(mount_dir, &self.actor, &[])?,
+            )
+        } else {
+            let engine = Engine::init(mount_dir, &self.actor, &[])?;
+            copy_tree(folder, mount_dir, &SKIP_NAMES)?;
+            (SourceKind::LocalFolder, engine)
+        };
+        let snapshot = engine.snapshot()?;
+        Ok((kind, engine, snapshot))
+    }
+
+    /// Download the bucket into `mount_dir` with its own engine.
+    fn import_remote(
+        &self,
+        remote: &RemoteFolder,
+        mount_dir: &Path,
+    ) -> Result<(Engine, Option<String>), Error> {
+        fs::create_dir_all(mount_dir)?;
+        let mut engine = Engine::init(mount_dir, &self.actor, &[])?;
+        remote.download_all(mount_dir).map_err(engine_err)?;
+        let snapshot = engine.snapshot()?;
+        Ok((engine, snapshot))
+    }
+
+    /// Attach a bucket prefix as a mounted source (ADR-0012): the objects
+    /// import into the mount, which carries its own engine and history;
+    /// the listing's fingerprint guards every later mirror home.
+    pub fn attach_remote(&mut self, url: &str, name: &str) -> Result<Source, Error> {
+        let control = self.root.join(CONTROL_DIR);
+        let mut config = read_workspace_config(&control)?;
+        let mount_dir = self.root.join(name);
+        mount_refusals(name, &config, &mount_dir)?;
+
+        // Settle every engine before the boundary moves.
+        self.auto_snapshot()?;
+
+        let remote = RemoteFolder::open(url).map_err(engine_err)?;
+        let (engine, snapshot) = match self.import_remote(&remote, &mount_dir) {
+            Ok(imported) => imported,
+            Err(error) => {
+                // A half-made mount must not squat the name: the refusal
+                // already speaks; a cleanup failure resurfaces as the
+                // collision refusal on retry.
+                let _ = fs::remove_dir_all(&mount_dir);
+                return Err(error);
+            }
+        };
+        // The bucket equals the import at this instant; record the
+        // listing fingerprint the first mirror checks against.
+        let fingerprint = remote.fingerprint().map_err(engine_err)?;
+        let head = engine.head()?;
+        self.coordination
+            .record_sync_state(name, &fingerprint, &head)?;
+
+        let source = Source {
+            kind: SourceKind::Remote,
+            path: PathBuf::from(url),
+            sync: SyncPolicy::TwoWay,
+            mount: name.to_owned(),
+            branch: None,
+        };
+        config.sources.push(source.clone());
+        write_workspace_config(&control, &config)?;
+
+        // The root engine's boundary now excludes the new mount; reopen it
+        // so its ignores see the world as configured.
+        let mount_names = mount_names(&config);
+        self.engine = Engine::open(&self.root, &self.actor, &mount_names)?;
+        let position = self
+            .mounts
+            .binary_search_by(|mount| mount.name.as_str().cmp(name))
+            .unwrap_or_else(|position| position);
+        self.mounts.insert(
+            position,
+            MountedSource {
+                name: name.to_owned(),
+                engine,
+                branch: None,
+            },
+        );
 
         let reference = snapshot.map(|id| format!("{name} {id}"));
         let entry = self.entry(Act::SourceAttach, reference)?;
@@ -1226,16 +1351,16 @@ impl Workspace {
         let Some(entry) = config.sources.iter().find(|s| s.mount == mount) else {
             return Err(Error::Config(format!("no source is attached at {mount:?}")));
         };
-        match entry.kind {
+        let target = match entry.kind {
             SourceKind::LocalGit => {
                 return Err(Error::Config(format!(
                     "{mount:?} is a git source; landed work publishes with plain git push"
                 )));
             }
-            SourceKind::LocalFolder => {}
-        }
-        let origin = self.origin_path(&entry.path);
-        let outcome = self.sync_source(source, &origin, force)?;
+            SourceKind::LocalFolder => SyncTarget::Folder(self.origin_path(&entry.path)),
+            SourceKind::Remote => SyncTarget::Remote(entry.path.display().to_string()),
+        };
+        let outcome = self.sync_source(source, &target, force)?;
         let (act, detail) = match &outcome {
             SyncOutcome::Synced { snapshot } => (Act::Sync, snapshot.clone()),
             SyncOutcome::Parked { snapshot } => {
@@ -1261,12 +1386,12 @@ impl Workspace {
         }
     }
 
-    /// Export the line's head to the origin under the fingerprint guard;
+    /// Export the line's head to the target under the fingerprint guard;
     /// no journaling - the caller records the act in its own context.
     fn sync_source(
         &mut self,
         source: Option<&str>,
-        origin: &Path,
+        target: &SyncTarget,
         force: bool,
     ) -> Result<SyncOutcome, Error> {
         let mount = source.unwrap_or(ROOT_MOUNT);
@@ -1283,18 +1408,42 @@ impl Workspace {
             None => self.engine.head()?,
             Some(index) => self.mounts[index].engine.head()?,
         };
+        let remote = match target {
+            SyncTarget::Folder(_) => None,
+            SyncTarget::Remote(url) => Some(RemoteFolder::open(url).map_err(engine_err)?),
+        };
         if !force {
             let recorded = self.coordination.sync_state(mount)?;
-            let current = folder_fingerprint(origin)?;
+            let current = match (target, &remote) {
+                (SyncTarget::Folder(origin), _) => folder_fingerprint(origin)?,
+                (SyncTarget::Remote(_), Some(remote)) => {
+                    remote.fingerprint().map_err(engine_err)?
+                }
+                (SyncTarget::Remote(_), None) => unreachable_remote()?,
+            };
             if recorded.as_deref() != Some(current.as_str()) {
                 return Ok(SyncOutcome::Parked { snapshot });
             }
         }
-        match index {
-            None => self.engine.export_tree(&snapshot, origin)?,
-            Some(index) => self.mounts[index].engine.export_tree(&snapshot, origin)?,
-        }
-        let fingerprint = folder_fingerprint(origin)?;
+        let engine = match index {
+            None => &self.engine,
+            Some(index) => &self.mounts[index].engine,
+        };
+        let fingerprint = match (target, &remote) {
+            (SyncTarget::Folder(origin), _) => {
+                engine.export_tree(&snapshot, origin)?;
+                folder_fingerprint(origin)?
+            }
+            (SyncTarget::Remote(_), Some(remote)) => {
+                // The landed tree materializes in a scratch directory and
+                // the adapter reconciles the bucket against it (ADR-0012).
+                let scratch = tempfile::tempdir()?;
+                engine.export_tree(&snapshot, scratch.path())?;
+                remote.mirror(scratch.path()).map_err(engine_err)?;
+                remote.fingerprint().map_err(engine_err)?
+            }
+            (SyncTarget::Remote(_), None) => unreachable_remote()?,
+        };
         self.coordination
             .record_sync_state(mount, &fingerprint, &snapshot)?;
         Ok(SyncOutcome::Synced { snapshot })
@@ -1315,12 +1464,12 @@ impl Workspace {
         let Some(entry) = config.sources.iter().find(|s| s.mount == mount) else {
             return Ok(());
         };
-        match entry.kind {
+        let target = match entry.kind {
             SourceKind::LocalGit => return Ok(()),
-            SourceKind::LocalFolder => {}
-        }
-        let origin = self.origin_path(&entry.path);
-        let (act, detail) = match self.sync_source(source, &origin, false) {
+            SourceKind::LocalFolder => SyncTarget::Folder(self.origin_path(&entry.path)),
+            SourceKind::Remote => SyncTarget::Remote(entry.path.display().to_string()),
+        };
+        let (act, detail) = match self.sync_source(source, &target, false) {
             Ok(SyncOutcome::Synced { snapshot }) => (Act::Sync, snapshot),
             Ok(SyncOutcome::Parked { snapshot }) => {
                 (Act::SyncParked, format!("{snapshot} origin changed"))
@@ -1969,21 +2118,10 @@ fn adopted_branch(source: &Path) -> Result<Option<String>, Error> {
         .strip_prefix("ref: refs/heads/")
         .map(str::to_owned))
 }
-/// Everything that refuses a mount attach, each by name: a missing
-/// folder, an invalid mount name, a source already attached, a mount
-/// colliding with workspace content, an LFS-bearing source (ADR-0002).
-fn attach_refusals(
-    folder: &Path,
-    name: &str,
-    config: &WorkspaceConfig,
-    mount_dir: &Path,
-) -> Result<(), Error> {
-    if !folder.is_dir() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("source folder not found: {}", folder.display()),
-        )));
-    }
+/// Everything that refuses a mount attach regardless of source kind,
+/// each by name: an invalid mount name, a source already attached, a
+/// mount colliding with workspace content.
+fn mount_refusals(name: &str, config: &WorkspaceConfig, mount_dir: &Path) -> Result<(), Error> {
     valid_mount_name(name)?;
     if config.sources.iter().any(|s| s.mount == name) {
         return Err(Error::AlreadyAttached);
@@ -1992,9 +2130,6 @@ fn attach_refusals(
         return Err(Error::Config(format!(
             "mount {name:?} collides with existing workspace content"
         )));
-    }
-    if folder_uses_lfs(folder)? {
-        return Err(Error::LfsSourceUnsupported);
     }
     Ok(())
 }
