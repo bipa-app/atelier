@@ -168,6 +168,7 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
     assert_eq!(
         names,
         [
+            "manifest",
             "open_session",
             "read",
             "write",
@@ -584,4 +585,30 @@ fn the_land_verb_lands_a_session_through_the_gate() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("session s1 is landed"));
+}
+
+#[test]
+fn the_manifest_reads_the_same_over_mcp_and_the_cli() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create temp workspace");
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut client = McpClient::start(config_home.path(), workspace.path(), &[]);
+    let payload = client.call("manifest", &json!({}));
+    let over_mcp = payload["manifest"].as_str().expect("manifest is text");
+
+    let printed = ws(config_home.path(), workspace.path())
+        .arg("manifest")
+        .assert()
+        .success();
+    // One render, three faces: the CLI prints the identical text.
+    assert_eq!(stdout_lines(&printed).join("\n"), over_mcp);
+    assert!(
+        over_mcp.contains("the loop:"),
+        "the manifest orients an actor: {over_mcp}"
+    );
 }
