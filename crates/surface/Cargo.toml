@@ -3,6 +3,8 @@ name = "atelier-surface"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "The agent surface: MCP over stdio, thin over the atelier SDK"
 publish = false
 
 [lints]
