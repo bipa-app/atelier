@@ -63,6 +63,19 @@ enum Command {
         #[arg(long, default_value_t = 500)]
         debounce_ms: u64,
     },
+    /// Open a session and run a command inside its working copy: every
+    /// edit the command makes is versioned, attributed, and ready to land.
+    Run {
+        /// One line on what this run is doing and why.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Land the session's change when the command succeeds.
+        #[arg(long)]
+        land: bool,
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
     /// Serve the workspace to agents.
     Serve {
         /// Speak MCP over stdio, one client per process.
@@ -95,6 +108,11 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
         Command::Land { session } => land(&session),
         Command::Watch { debounce_ms } => watch(debounce_ms),
+        Command::Run {
+            summary,
+            land,
+            command,
+        } => run_in_session(summary.as_deref(), land, &command),
         Command::Serve {
             mcp_stdio,
             http,
@@ -264,6 +282,51 @@ fn land(session: &str) -> Result<Vec<String>> {
     let id: SessionId = session.parse()?;
     let outcome = workspace.land(id)?;
     Ok(render_outcome(&outcome))
+}
+
+fn run_in_session(
+    summary: Option<&str>,
+    land_after: bool,
+    command: &[String],
+) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let actor = workspace.actor().clone();
+    let summary = match summary {
+        Some(summary) => summary.to_owned(),
+        None => format!("run: {}", command.join(" ")),
+    };
+    let instruction = atelier_core::Instruction {
+        summary,
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = workspace.open_session(&actor, &instruction)?;
+    let status = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(&session.working_copy)
+        .status()
+        .with_context(|| format!("run {:?}", command[0]))?;
+
+    // The diff snapshots the session's outstanding edits either way, so a
+    // failing command's work is versioned before this returns.
+    let diff = workspace.session_diff(session.id)?;
+    if !status.success() {
+        bail!(
+            "command failed ({status}); session {id} keeps the work - land with: atelier land {id}",
+            id = session.id
+        );
+    }
+    let mut lines = render_diff(&diff);
+    if land_after {
+        let outcome = workspace.land(session.id)?;
+        lines.extend(render_outcome(&outcome));
+    } else {
+        lines.push(format!(
+            "session {id} holds the change; land with: atelier land {id}",
+            id = session.id
+        ));
+    }
+    Ok(lines)
 }
 
 /// Blocks until the process is interrupted, printing each act as it

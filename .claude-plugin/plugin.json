@@ -1,0 +1,8 @@
+{
+  "name": "atelier",
+  "version": "0.1.0",
+  "description": "Work inside atelier workspaces: sessions, gated landing, journal. Injects the workspace manifest at session start and teaches the session loop.",
+  "repository": "https://github.com/bipa-app/atelier",
+  "license": "Apache-2.0",
+  "keywords": ["workspaces", "versioning", "agents"]
+}
