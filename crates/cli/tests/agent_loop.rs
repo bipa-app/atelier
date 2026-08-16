@@ -650,3 +650,83 @@ fn the_status_reads_the_same_over_mcp_and_the_cli() {
         "the status names the live state: {over_mcp}"
     );
 }
+
+#[test]
+fn an_undo_and_a_concurrent_apply_share_the_landing_lease() {
+    let config_home = TempDir::new().expect("create temp config home");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create temp workspace");
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut client = McpClient::start(
+        config_home.path(),
+        workspace.path(),
+        &[("ATELIER_LAND_HOLD_MS", "4000")],
+    );
+    for (session, file, content) in [("s1", "a.txt", "from s1\n"), ("s2", "b.txt", "from s2\n")] {
+        let opened = client.call(
+            "open_session",
+            &json!({
+                "actor_name": "scribe",
+                "actor_kind": "agent",
+                "instruction_summary": "race the undo",
+            }),
+        );
+        assert_eq!(opened["session_id"], session);
+        client.call(
+            "write",
+            &json!({"session_id": session, "path": file, "content": content}),
+        );
+        client.call("request_land", &json!({"session_id": session}));
+    }
+    // r1 lands cleanly first (the hold makes it slow, not contended).
+    let landed = client.call(
+        "approve",
+        &json!({"request_id": "r1", "actor_name": "scribe", "actor_kind": "agent"}),
+    );
+    assert_eq!(landed["state"], "landed");
+
+    // The server begins the r2 apply and sits on the lease; the undo of
+    // r1 from another process loses the claim and learns who holds it.
+    let approving = client.send_request(
+        "tools/call",
+        &json!({"name": "approve", "arguments": {
+            "request_id": "r2", "actor_name": "scribe", "actor_kind": "agent",
+        }}),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    ws(config_home.path(), workspace.path())
+        .args(["undo", "r1"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::is_match(
+                r"^error: the landing lease is held by test-actor:\d+ until \d+\n$",
+            )
+            .expect("valid pattern"),
+        );
+
+    let response = client.recv(approving);
+    let (outcome, is_error) = decode_tool_result(&response);
+    assert!(!is_error, "the winner's approve failed: {outcome}");
+    assert_eq!(outcome["state"], "landed");
+
+    // With the lease free, undo composes backward through both landings,
+    // and the CLI face says exactly what returned.
+    let undone = ws(config_home.path(), workspace.path())
+        .args(["undo", "r2"])
+        .assert()
+        .success();
+    let lines = stdout_lines(&undone);
+    assert_line_matches(&lines[0], &format!("^restored {SNAPSHOT_ID}$"));
+    assert_eq!(lines[1], "r2 is open again; approvals dismissed");
+    ws(config_home.path(), workspace.path())
+        .args(["undo", "r1"])
+        .assert()
+        .success();
+    assert!(!workspace.path().join("a.txt").exists());
+    assert!(!workspace.path().join("b.txt").exists());
+}

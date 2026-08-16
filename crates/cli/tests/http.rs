@@ -726,6 +726,11 @@ fn rest_speaks_every_verb_the_tools_speak() {
         &json!({"reason": "not like this"}),
     );
     assert_eq!(rejected["state"], "rejected");
+
+    // A rejected request refuses to undo, 422 with the reason by name.
+    let (status, body) = server.request("POST", "/v1/requests/r2/undo", "{}");
+    assert_eq!(status, 422, "got: {body}");
+    assert!(body.contains("only a landed request undoes"), "got: {body}");
     server.json(
         "POST",
         "/v1/sessions",
