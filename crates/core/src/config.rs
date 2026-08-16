@@ -132,6 +132,9 @@ pub(crate) const ROOT_MOUNT: &str = "/";
 pub enum SourceKind {
     LocalFolder,
     LocalGit,
+    /// A bucket prefix behind the remote adapter (ADR-0012): s3://, gs://,
+    /// az://, or file:// for tests. The source path holds the URL.
+    Remote,
 }
 
 impl fmt::Display for SourceKind {
@@ -139,6 +142,7 @@ impl fmt::Display for SourceKind {
         match self {
             Self::LocalFolder => f.write_str("local-folder"),
             Self::LocalGit => f.write_str("local-git"),
+            Self::Remote => f.write_str("remote"),
         }
     }
 }

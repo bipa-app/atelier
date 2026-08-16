@@ -23,10 +23,11 @@ pub struct Cli {
 enum Command {
     /// Initialize a workspace.
     Init { path: Option<PathBuf> },
-    /// Attach a local folder: imported into the root, or — with --mount —
-    /// as a mounted source carrying its own history.
+    /// Attach a source: a local folder (imported into the root, or — with
+    /// --mount — as a mounted source), or a bucket URL (s3://, gs://,
+    /// az://), which always mounts (ADR-0012).
     Attach {
-        folder: PathBuf,
+        source: String,
         /// Mount the source at this name with its own engine and history.
         #[arg(long)]
         mount: Option<String>,
@@ -114,7 +115,7 @@ enum Command {
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
     match cli.command {
         Command::Init { path } => init(path),
-        Command::Attach { folder, mount } => attach(&folder, mount.as_deref()),
+        Command::Attach { source, mount } => attach(&source, mount.as_deref()),
         Command::Manifest => manifest(),
         Command::Status => status(),
         Command::Diff => diff(),
@@ -157,21 +158,28 @@ fn init(path: Option<PathBuf>) -> Result<Vec<String>> {
     )])
 }
 
-fn attach(folder: &Path, mount: Option<&str>) -> Result<Vec<String>> {
+fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
     let root = env::current_dir().context("read the current directory")?;
     let mut workspace = Workspace::open(root)?;
-    let source = match mount {
-        Some(name) => workspace.attach_mount(folder, name)?,
-        None => workspace.attach(folder)?,
+    let attached = if atelier_core::is_remote_url(source) {
+        let Some(name) = mount else {
+            bail!("remote sources mount; pass --mount <name>");
+        };
+        workspace.attach_remote(source, name)?
+    } else {
+        match mount {
+            Some(name) => workspace.attach_mount(Path::new(source), name)?,
+            None => workspace.attach(Path::new(source))?,
+        }
     };
 
     let line = match mount {
         Some(name) => format!(
             "attached {} {} at {name}",
-            source.kind,
-            source.path.display()
+            attached.kind,
+            attached.path.display()
         ),
-        None => format!("attached {} {}", source.kind, source.path.display()),
+        None => format!("attached {} {}", attached.kind, attached.path.display()),
     };
     Ok(vec![line])
 }

@@ -11,6 +11,8 @@ publish = false
 workspace = true
 
 [dependencies]
+atelier-source-remote = { path = "../source-remote" }
+tempfile.workspace = true
 atelier-diff-core = { path = "../diff-core" }
 atelier-format-docx = { path = "../format-docx" }
 futures.workspace = true
