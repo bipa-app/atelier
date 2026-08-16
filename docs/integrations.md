@@ -45,12 +45,25 @@ diff, and leaves the session holding the change (`--land` lands on success; a
 failing command keeps its work versioned in the open session). This works for
 every harness, including ones with no plugin system at all.
 
-## The plugin: one repo, three installers
+## The plugin: one repo, every installer
 
 This repository is itself a passive plugin — the `atelier-workspace-loop`
 skill plus, for Claude Code, a SessionStart hook that injects
 `atelier manifest` as context when the project is a workspace (silent
 anywhere else).
+
+The root `skills/` layout follows the skills.sh convention, so the broadest
+installer covers every harness that tool knows (Claude Code, codex, Cursor,
+OpenHands, and a dozen others), project- or user-level:
+
+```sh
+npx skills add bipa-app/atelier        # needs read access; the repo is private
+```
+
+The repo is not listed in the public skills.sh registry (`npx skills find`)
+until it goes public — listing is part of the pending announce decision.
+
+Native plugin installs, where a harness has its own machinery:
 
 ```sh
 omp plugin install git@github.com:bipa-app/atelier     # Oh My Pi
@@ -59,7 +72,7 @@ claude plugin install atelier@<marketplace>            # Claude Code, or:
 claude --plugin-dir ~/work/atelier                     # local
 ```
 
-codex has no plugin system; install the skill directly:
+codex without skills.sh: copy the skill directly:
 
 ```sh
 cp -r skills/atelier-workspace-loop "${CODEX_HOME:-$HOME/.codex}/skills/"
