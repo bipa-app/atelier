@@ -1,8 +1,11 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use atelier_core::{GateOutcome, JournalEntry, RequestId, Workspace, printable, render_diff};
+use atelier_core::{
+    GateOutcome, JournalEntry, RequestId, WatchEvent, WatchStop, Workspace, printable, render_diff,
+};
 use clap::{Parser, Subcommand};
 
 const JOURNAL_LIMIT: usize = 100;
@@ -39,6 +42,12 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Watch the workspace: external edits become attributed snapshots.
+    Watch {
+        /// Quiet time after an edit storm before its snapshot, in milliseconds.
+        #[arg(long, default_value_t = 500)]
+        debounce_ms: u64,
+    },
     /// Serve the workspace to agents.
     Serve {
         /// Speak MCP over stdio, one client per process.
@@ -58,6 +67,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Requests => requests(),
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
+        Command::Watch { debounce_ms } => watch(debounce_ms),
         Command::Serve { mcp_stdio } => serve(mcp_stdio),
     }
 }
@@ -188,6 +198,25 @@ fn reject(request: &str, reason: Option<&str>) -> Result<Vec<String>> {
     let actor = workspace.actor().clone();
     let rejected = workspace.reject(id, &actor, reason)?;
     Ok(vec![format!("rejected {}", rejected.id)])
+}
+
+/// Blocks until the process is interrupted, printing each act as it
+/// happens; Rust's stdout is line-buffered, so every line lands as soon
+/// as it prints — a reader on the other end of a pipe sees acts live.
+fn watch(debounce_ms: u64) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let root = env::current_dir().context("read the current directory")?;
+    // The CLI never stops the loop itself; interrupting the process does.
+    let stop = WatchStop::new();
+    workspace.watch(
+        Duration::from_millis(debounce_ms),
+        |event| match event {
+            WatchEvent::Started => println!("watching {}", root.display()),
+            WatchEvent::Snapshotted { snapshot } => println!("snapshot {snapshot}"),
+        },
+        &stop,
+    )?;
+    Ok(Vec::new())
 }
 
 fn serve(mcp_stdio: bool) -> Result<Vec<String>> {

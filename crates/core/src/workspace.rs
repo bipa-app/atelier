@@ -2,12 +2,14 @@ use std::env::{self, VarError};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atelier_diff_core::{
     Delta, DeltaKind, Diff, FormatPackage, PackageId, as_text, detect_package, diff_lines,
 };
 use atelier_format_docx::DocxPackage;
+use notify::{Event, RecursiveMode, Watcher};
 
 use crate::config::{
     Actor, InstructionFidelity, Source, SourceKind, SyncPolicy, WorkspaceConfig,
@@ -21,13 +23,16 @@ use crate::landing::{Approval, GateOutcome, LandingRequest, RequestId, RequestSt
 use crate::projection::ProjectionCache;
 use crate::read::{ReadResult, window_size, window_text};
 use crate::session::{Instruction, Session, SessionId, SessionState};
+use crate::watch::{
+    STOP_TICK, WatchEvent, WatchStop, event_is_content, settle, watcher_failed, watcher_gone,
+};
 
 pub use crate::engine::Snapshot;
 
 const CONTROL_DIR: &str = ".atelier";
 const JOURNAL_FILE: &str = "journal.sqlite3";
 const SESSIONS_DIR: &str = "sessions";
-const SKIP_NAMES: [&str; 3] = [".atelier", ".jj", ".git"];
+pub(crate) const SKIP_NAMES: [&str; 3] = [".atelier", ".jj", ".git"];
 
 /// The one scarce point of a workspace in v1: its landing point.
 const LANDING_LEASE_POINT: &str = "landing";
@@ -437,10 +442,74 @@ impl Workspace {
         self.session(id)
     }
 
-    fn auto_snapshot(&mut self) -> Result<(), Error> {
-        if let Some(id) = self.engine.snapshot()? {
-            let entry = self.entry(Act::Snapshot, Some(id))?;
-            self.journal.append(&entry)?;
+    /// Snapshot outstanding edits through the one snapshot path every
+    /// operation shares; the new snapshot's id when the tree changed.
+    fn auto_snapshot(&mut self) -> Result<Option<String>, Error> {
+        let Some(id) = self.engine.snapshot()? else {
+            return Ok(None);
+        };
+        let entry = self.entry(Act::Snapshot, Some(id.clone()))?;
+        self.journal.append(&entry)?;
+        Ok(Some(id))
+    }
+
+    /// Watch the workspace root: external edits become attributed
+    /// snapshots through the same snapshot path every operation uses.
+    /// Blocks until `stop` asks it to return; edits made while no watcher
+    /// runs are caught up by the scan at start. Each snapshot — and the
+    /// armed watcher itself — reaches the caller through `on_event`.
+    pub fn watch(
+        &mut self,
+        debounce: Duration,
+        mut on_event: impl FnMut(&WatchEvent),
+        stop: &WatchStop,
+    ) -> Result<(), Error> {
+        // notify reports canonical paths; the filter's prefix check needs
+        // the root in the same form.
+        let root = fs::canonicalize(&self.root)?;
+        let (pulses, storm) = std::sync::mpsc::channel();
+        let filter_root = root.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |event: Result<Event, notify::Error>| {
+                let pulse = match event {
+                    Ok(event) => {
+                        if !event_is_content(&filter_root, &event) {
+                            return;
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                // A send after the loop returned has no listener; that is the
+                // watcher being dropped, not a failure.
+                let _ = pulses.send(pulse);
+            })
+            .map_err(|error| watcher_failed(&error))?;
+        watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(|error| watcher_failed(&error))?;
+        on_event(&WatchEvent::Started);
+        self.snapshot_watched(&mut on_event)?;
+        while !stop.stopped() {
+            match storm.recv_timeout(STOP_TICK) {
+                Ok(Ok(())) => {
+                    settle(&storm, debounce, stop)?;
+                    self.snapshot_watched(&mut on_event)?;
+                }
+                Ok(Err(error)) => return Err(watcher_failed(&error)),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err(watcher_gone()),
+            }
+        }
+        Ok(())
+    }
+
+    /// One watched snapshot: fold in operations other processes committed,
+    /// then snapshot; a recorded snapshot reaches the watcher's caller.
+    fn snapshot_watched(&mut self, on_event: &mut impl FnMut(&WatchEvent)) -> Result<(), Error> {
+        self.engine.refresh()?;
+        if let Some(snapshot) = self.auto_snapshot()? {
+            on_event(&WatchEvent::Snapshotted { snapshot });
         }
         Ok(())
     }

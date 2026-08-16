@@ -56,8 +56,9 @@ pub enum Confidence {
 /// A package never gates a diff — when it is absent or fails, fidelity drops
 /// to the text or binary rung instead. Determinism is contract: the same
 /// bytes under the same package version must produce the same projection
-/// and the same diff.
-pub trait FormatPackage {
+/// and the same diff. `Send + Sync` is part of the ABI: a workspace crosses
+/// threads (a watcher, a server), so its packages must too.
+pub trait FormatPackage: Send + Sync {
     /// The package's stable identity.
     fn id(&self) -> PackageId;
 
