@@ -23,8 +23,14 @@ pub struct Cli {
 enum Command {
     /// Initialize a workspace.
     Init { path: Option<PathBuf> },
-    /// Attach a local folder to the current workspace.
-    Attach { folder: PathBuf },
+    /// Attach a local folder: imported into the root, or — with --mount —
+    /// as a mounted source carrying its own history.
+    Attach {
+        folder: PathBuf,
+        /// Mount the source at this name with its own engine and history.
+        #[arg(long)]
+        mount: Option<String>,
+    },
     /// Show the changes between the two latest snapshots.
     Diff,
     /// Show recent workspace acts.
@@ -74,7 +80,7 @@ enum Command {
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
     match cli.command {
         Command::Init { path } => init(path),
-        Command::Attach { folder } => attach(&folder),
+        Command::Attach { folder, mount } => attach(&folder, mount.as_deref()),
         Command::Diff => diff(),
         Command::Journal => journal(),
         Command::History => history(),
@@ -107,16 +113,23 @@ fn init(path: Option<PathBuf>) -> Result<Vec<String>> {
     )])
 }
 
-fn attach(folder: &Path) -> Result<Vec<String>> {
+fn attach(folder: &Path, mount: Option<&str>) -> Result<Vec<String>> {
     let root = env::current_dir().context("read the current directory")?;
     let mut workspace = Workspace::open(root)?;
-    let source = workspace.attach(folder)?;
+    let source = match mount {
+        Some(name) => workspace.attach_mount(folder, name)?,
+        None => workspace.attach(folder)?,
+    };
 
-    Ok(vec![format!(
-        "attached {} {}",
-        source.kind,
-        source.path.display()
-    )])
+    let line = match mount {
+        Some(name) => format!(
+            "attached {} {} at {name}",
+            source.kind,
+            source.path.display()
+        ),
+        None => format!("attached {} {}", source.kind, source.path.display()),
+    };
+    Ok(vec![line])
 }
 
 fn diff() -> Result<Vec<String>> {
@@ -148,13 +161,19 @@ fn history() -> Result<Vec<String>> {
     workspace
         .log(HISTORY_LIMIT)?
         .iter()
-        .map(|snapshot| {
-            Ok(printable(&format!(
+        .map(|entry| {
+            let line = format!(
                 "{}  {}  {}",
-                snapshot.id,
-                snapshot.actor,
-                format_rfc3339_utc(snapshot.at_ms)?
-            )))
+                entry.snapshot.id,
+                entry.snapshot.actor,
+                format_rfc3339_utc(entry.snapshot.at_ms)?
+            );
+            // A mounted source's line carries its mount; root lines keep
+            // the exact v1 shape.
+            Ok(printable(&match &entry.source {
+                Some(source) => format!("{source}  {line}"),
+                None => line,
+            }))
         })
         .collect()
 }

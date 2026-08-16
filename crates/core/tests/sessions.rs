@@ -103,8 +103,8 @@ fn an_agent_session_lands_through_the_gate() {
     // The shared line advanced to the landed snapshot, attributed to the
     // agent, and the root working copy materialized the change.
     let log = ws.log(5).unwrap();
-    assert_eq!(log[0].id, snapshot);
-    assert_eq!(log[0].actor, "scribe");
+    assert_eq!(log[0].snapshot.id, snapshot);
+    assert_eq!(log[0].snapshot.actor, "scribe");
     assert_eq!(
         fs::read_to_string(root.path().join("notes.txt")).unwrap(),
         "agent draft\n"
@@ -157,7 +157,7 @@ fn landing_into_a_moved_conflicting_line_parks_the_request() {
 
     // The shared line moves with a conflicting edit.
     fs::write(root.path().join("notes.txt"), "human version\n").unwrap();
-    let head_before = ws.log(1).unwrap()[0].id.clone();
+    let head_before = ws.log(1).unwrap()[0].snapshot.id.clone();
 
     let request = ws.request_land(session.id).unwrap();
     let outcome = ws.approve(request.id, &agent()).unwrap();
@@ -167,7 +167,7 @@ fn landing_into_a_moved_conflicting_line_parks_the_request() {
     assert_eq!(parked.state, RequestState::Parked);
 
     // The shared line did not move and never carries the conflict.
-    assert_eq!(ws.log(1).unwrap()[0].id, head_before);
+    assert_eq!(ws.log(1).unwrap()[0].snapshot.id, head_before);
     assert_eq!(
         fs::read_to_string(root.path().join("notes.txt")).unwrap(),
         "human version\n"
@@ -441,7 +441,7 @@ fn a_stale_apply_cannot_overwrite_a_concurrent_abandonment() {
     let GateOutcome::Landed { snapshot } = outcome else {
         panic!("the held apply landed the approved tip, got {outcome:?}");
     };
-    assert_eq!(ws_b.log(2).unwrap()[0].id, snapshot);
+    assert_eq!(ws_b.log(2).unwrap()[0].snapshot.id, snapshot);
     assert_eq!(
         ws_b.request(request.id).unwrap().state,
         RequestState::Abandoned

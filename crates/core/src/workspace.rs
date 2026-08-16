@@ -13,7 +13,7 @@ use atelier_format_docx::DocxPackage;
 use notify::{Event, RecursiveMode, Watcher};
 
 use crate::config::{
-    Actor, InstructionFidelity, Source, SourceKind, SyncPolicy, WorkspaceConfig,
+    Actor, InstructionFidelity, ROOT_MOUNT, Source, SourceKind, SyncPolicy, WorkspaceConfig,
     read_workspace_config, resolve_actor, write_workspace_config,
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
@@ -41,15 +41,26 @@ const LANDING_LEASE_POINT: &str = "landing";
 /// point when this passes.
 const LANDING_LEASE_TTL_MS: i64 = 30_000;
 
-/// A named, versioned body of work content with its own history and journal.
+/// A named, versioned body of work content with its own histories and
+/// journal. The root engine is source zero; each mounted source carries
+/// its own engine and history (ADR-0009).
 pub struct Workspace {
     root: PathBuf,
     actor: Actor,
     engine: Engine,
+    /// Mounted sources in mount-name order — the deterministic order every
+    /// aggregate read model and the landing fan-out walk them in.
+    mounts: Vec<MountedSource>,
     journal: Journal,
     coordination: Coordination,
     packages: Vec<Box<dyn FormatPackage>>,
     projections: ProjectionCache,
+}
+
+/// One mounted source: its name and the engine carrying its history.
+struct MountedSource {
+    name: String,
+    engine: Engine,
 }
 
 impl Workspace {
@@ -67,17 +78,19 @@ impl Workspace {
         }
 
         fs::create_dir_all(&control)?;
-        let engine = Engine::init(&root, &actor)?;
+        let engine = Engine::init(&root, &actor, &[])?;
 
         let config = WorkspaceConfig::new(workspace_name(&root));
         write_workspace_config(&control, &config)?;
 
         let journal = Journal::open(&control.join(JOURNAL_FILE))?;
         let coordination = Coordination::open(&control.join(JOURNAL_FILE))?;
+        let mounts = Vec::new();
         let workspace = Self {
             root,
             actor,
             engine,
+            mounts,
             journal,
             coordination,
             packages: builtin_packages(),
@@ -98,13 +111,23 @@ impl Workspace {
             return Err(Error::NotAWorkspace(root));
         }
 
-        let engine = Engine::open(&root, &actor)?;
+        let config = read_workspace_config(&control)?;
+        let mount_names = mount_names(&config);
+        let engine = Engine::open(&root, &actor, &mount_names)?;
+        let mut mounts = Vec::new();
+        for name in &mount_names {
+            mounts.push(MountedSource {
+                name: name.clone(),
+                engine: Engine::open(&root.join(name), &actor, &[])?,
+            });
+        }
         let journal = Journal::open(&control.join(JOURNAL_FILE))?;
         let coordination = Coordination::open(&control.join(JOURNAL_FILE))?;
         Ok(Self {
             root,
             actor,
             engine,
+            mounts,
             journal,
             coordination,
             packages: builtin_packages(),
@@ -118,7 +141,9 @@ impl Workspace {
         &self.actor
     }
 
-    /// Attach the one local-folder source, importing its content.
+    /// Attach a local folder, importing its content into the root — source
+    /// zero. One root import per workspace; mounted sources go through
+    /// [`Workspace::attach_mount`].
     pub fn attach(&mut self, folder: impl AsRef<Path>) -> Result<Source, Error> {
         let folder = folder.as_ref();
         if !folder.is_dir() {
@@ -130,7 +155,7 @@ impl Workspace {
 
         let control = self.root.join(CONTROL_DIR);
         let mut config = read_workspace_config(&control)?;
-        if !config.sources.is_empty() {
+        if config.sources.iter().any(|s| s.mount == ROOT_MOUNT) {
             return Err(Error::AlreadyAttached);
         }
         if folder_uses_lfs(folder)? {
@@ -144,7 +169,7 @@ impl Workspace {
             kind: SourceKind::LocalFolder,
             path: folder.to_path_buf(),
             sync: SyncPolicy::TwoWay,
-            mount: PathBuf::from("/"),
+            mount: ROOT_MOUNT.to_owned(),
         };
         config.sources.push(source.clone());
         write_workspace_config(&control, &config)?;
@@ -155,34 +180,123 @@ impl Workspace {
         Ok(source)
     }
 
-    /// The ancestor chain of the latest snapshot, newest first.
-    pub fn log(&mut self, limit: usize) -> Result<Vec<Snapshot>, Error> {
-        self.engine.refresh()?;
+    /// Attach a local folder as a mounted source: its own engine, its own
+    /// history, at `root/<name>` (ADR-0009).
+    pub fn attach_mount(&mut self, folder: impl AsRef<Path>, name: &str) -> Result<Source, Error> {
+        let folder = folder.as_ref();
+        if !folder.is_dir() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("source folder not found: {}", folder.display()),
+            )));
+        }
+        valid_mount_name(name)?;
+        let control = self.root.join(CONTROL_DIR);
+        let mut config = read_workspace_config(&control)?;
+        if config.sources.iter().any(|s| s.mount == name) {
+            return Err(Error::AlreadyAttached);
+        }
+        let mount_dir = self.root.join(name);
+        if mount_dir.exists() {
+            return Err(Error::Config(format!(
+                "mount {name:?} collides with existing workspace content"
+            )));
+        }
+        if folder_uses_lfs(folder)? {
+            return Err(Error::LfsSourceUnsupported);
+        }
+
+        // Settle every engine before the boundary moves.
         self.auto_snapshot()?;
-        self.engine.log(limit)
+
+        fs::create_dir_all(&mount_dir)?;
+        let mut engine = Engine::init(&mount_dir, &self.actor, &[])?;
+        copy_tree(folder, &mount_dir)?;
+        let snapshot = engine.snapshot()?;
+
+        let source = Source {
+            kind: SourceKind::LocalFolder,
+            path: folder.to_path_buf(),
+            sync: SyncPolicy::TwoWay,
+            mount: name.to_owned(),
+        };
+        config.sources.push(source.clone());
+        write_workspace_config(&control, &config)?;
+
+        // The root engine's boundary now excludes the new mount; reopen it
+        // so its ignores see the world as configured.
+        let mount_names = mount_names(&config);
+        self.engine = Engine::open(&self.root, &self.actor, &mount_names)?;
+        let position = self
+            .mounts
+            .binary_search_by(|mount| mount.name.as_str().cmp(name))
+            .unwrap_or_else(|position| position);
+        self.mounts.insert(
+            position,
+            MountedSource {
+                name: name.to_owned(),
+                engine,
+            },
+        );
+
+        let reference = snapshot.map(|id| format!("{name} {id}"));
+        let entry = self.entry(Act::SourceAttach, reference)?;
+        self.journal.append(&entry)?;
+        Ok(source)
     }
 
-    /// Diff the latest snapshot against its first parent, each delta raised
-    /// to the highest rung the ladder allows.
+    /// The shared lines' snapshots: the root's, then each mount's in name
+    /// order, each newest first, `limit` applying per source.
+    pub fn log(&mut self, limit: usize) -> Result<Vec<SourceSnapshot>, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        let mut entries = Vec::new();
+        for snapshot in self.engine.log(limit)? {
+            entries.push(SourceSnapshot {
+                source: None,
+                snapshot,
+            });
+        }
+        for mount in &self.mounts {
+            for snapshot in mount.engine.log(limit)? {
+                entries.push(SourceSnapshot {
+                    source: Some(mount.name.clone()),
+                    snapshot,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Diff each source's latest snapshot against its first parent, root
+    /// first then mounts in name order, every delta raised to the highest
+    /// rung the ladder allows and mounted addresses scoped by mount.
     pub fn diff_latest(&mut self) -> Result<Diff, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         self.auto_snapshot()?;
         let (diff, sides) = self.engine.diff_latest()?;
-        self.raised(diff, &sides)
+        let mut deltas = self.raised(&self.engine, diff, &sides, None)?.deltas;
+        for mount in &self.mounts {
+            let (mount_diff, sides) = mount.engine.diff_latest()?;
+            let raised = self.raised(&mount.engine, mount_diff, &sides, Some(&mount.name))?;
+            deltas.extend(raised.deltas);
+        }
+        Ok(Diff { deltas })
     }
 
-    /// Diff two snapshots by id: `before` against `after`, each delta
-    /// raised to the highest rung the ladder allows.
+    /// Diff two of the root line's snapshots by id: `before` against
+    /// `after`, each delta raised to the highest rung the ladder allows.
+    /// Mounted lines' snapshot pairs arrive with the session fan-out.
     pub fn diff_between(&mut self, before: &str, after: &str) -> Result<Diff, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         self.auto_snapshot()?;
         let (diff, sides) = self.engine.diff_between(before, after)?;
-        self.raised(diff, &sides)
+        self.raised(&self.engine, diff, &sides, None)
     }
 
     /// Read up to `limit` journal entries, newest first.
     pub fn journal(&mut self, limit: usize) -> Result<Vec<JournalEntry>, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         self.auto_snapshot()?;
         self.journal.entries(limit)
     }
@@ -195,7 +309,7 @@ impl Workspace {
         actor: &Actor,
         instruction: &Instruction,
     ) -> Result<Session, Error> {
-        self.engine.refresh()?;
+        self.refresh_engines()?;
         self.auto_snapshot()?;
         let verbatim = match self.config()?.journal.instruction_fidelity {
             InstructionFidelity::Summary => None,
@@ -301,7 +415,7 @@ impl Workspace {
         let tip = self.snapshot_session(&session)?;
         let base = self.engine.parent_of(&tip)?;
         let (diff, sides) = self.engine.diff_between(&base, &tip)?;
-        self.raised(diff, &sides)
+        self.raised(&self.engine, diff, &sides, None)
     }
 
     /// Open the session's landing request — the gate's object, never a
@@ -488,15 +602,38 @@ impl Workspace {
         self.session(id)
     }
 
-    /// Snapshot outstanding edits through the one snapshot path every
-    /// operation shares; the new snapshot's id when the tree changed.
-    fn auto_snapshot(&mut self) -> Result<Option<String>, Error> {
-        let Some(id) = self.engine.snapshot()? else {
-            return Ok(None);
-        };
-        let entry = self.entry(Act::Snapshot, Some(id.clone()))?;
-        self.journal.append(&entry)?;
-        Ok(Some(id))
+    /// Snapshot outstanding edits in every engine — root first, mounts in
+    /// name order — through the one snapshot path every operation shares;
+    /// each recorded snapshot with the source that took it.
+    fn auto_snapshot(&mut self) -> Result<Vec<(Option<String>, String)>, Error> {
+        let mut recorded = Vec::new();
+        if let Some(id) = self.engine.snapshot()? {
+            let entry = self.entry(Act::Snapshot, Some(id.clone()))?;
+            self.journal.append(&entry)?;
+            recorded.push((None, id));
+        }
+        for mount in &mut self.mounts {
+            if let Some(id) = mount.engine.snapshot()? {
+                recorded.push((Some(mount.name.clone()), id));
+            }
+        }
+        for (mount, id) in &recorded {
+            if let Some(mount) = mount {
+                let entry = self.entry(Act::Snapshot, Some(format!("{mount} {id}")))?;
+                self.journal.append(&entry)?;
+            }
+        }
+        Ok(recorded)
+    }
+
+    /// Reload every engine at its current operation head, folding in what
+    /// other processes committed since this handle loaded.
+    fn refresh_engines(&mut self) -> Result<(), Error> {
+        self.engine.refresh()?;
+        for mount in &mut self.mounts {
+            mount.engine.refresh()?;
+        }
+        Ok(())
     }
 
     /// Watch the workspace root: external edits become attributed
@@ -553,8 +690,8 @@ impl Workspace {
     /// One watched snapshot: fold in operations other processes committed,
     /// then snapshot; a recorded snapshot reaches the watcher's caller.
     fn snapshot_watched(&mut self, on_event: &mut impl FnMut(&WatchEvent)) -> Result<(), Error> {
-        self.engine.refresh()?;
-        if let Some(snapshot) = self.auto_snapshot()? {
+        self.refresh_engines()?;
+        for (_, snapshot) in self.auto_snapshot()? {
             on_event(&WatchEvent::Snapshotted { snapshot });
         }
         Ok(())
@@ -669,7 +806,10 @@ impl Workspace {
     /// dismisses approvals (policy-decided) and re-opens an approved or
     /// parked request.
     fn snapshot_session(&mut self, session: &Session) -> Result<String, Error> {
-        let mut engine = Engine::open(&session.working_copy, &session.actor)?;
+        // The session's working copy shares the root's boundary: a mount
+        // name never lands on the shared line as root content.
+        let boundary = self.mount_boundary();
+        let mut engine = Engine::open(&session.working_copy, &session.actor, &boundary)?;
         let new_snapshot = engine.snapshot_amend()?;
         let tip = engine.head()?;
         if let Some(new_snapshot) = new_snapshot {
@@ -875,22 +1015,43 @@ impl Workspace {
     /// Raise every delta the ladder can: through a package projection when
     /// one detects the document, as plain text when both sides are text,
     /// else leave it at the binary rung it arrived at. A package differ's
-    /// rich deltas follow the file delta they refine.
-    fn raised(&self, diff: Diff, sides: &DiffSides) -> Result<Diff, Error> {
+    /// rich deltas follow the file delta they refine. Deltas from a
+    /// mounted source carry mount-scoped addresses.
+    fn raised(
+        &self,
+        engine: &Engine,
+        diff: Diff,
+        sides: &DiffSides,
+        mount: Option<&str>,
+    ) -> Result<Diff, Error> {
         let mut deltas = Vec::new();
         for delta in diff.deltas {
-            deltas.extend(self.raise(delta, sides)?);
+            deltas.extend(self.raise(engine, delta, sides, mount)?);
         }
         Ok(Diff { deltas })
     }
 
     /// Only `Changed` deltas raise in v1: an added or removed document is
     /// already told by its listing line, without dumping its whole content.
-    fn raise(&self, delta: Delta, sides: &DiffSides) -> Result<Vec<Delta>, Error> {
+    fn raise(
+        &self,
+        engine: &Engine,
+        delta: Delta,
+        sides: &DiffSides,
+        mount: Option<&str>,
+    ) -> Result<Vec<Delta>, Error> {
+        // The engine addresses files by the path inside its own world; the
+        // delta the workspace reports scopes that path by mount, and every
+        // journal entry below speaks the scoped address.
+        let raw = delta.address.as_str().to_owned();
+        let mut delta = delta;
+        if let Some(mount) = mount {
+            delta.address = Address::new(format!("{mount}/{raw}"));
+        }
         if delta.kind != DeltaKind::Changed {
             return Ok(vec![delta]);
         }
-        let (before, after) = match self.engine.read_file_sides(sides, delta.address.as_str())? {
+        let (before, after) = match engine.read_file_sides(sides, &raw)? {
             (Side::Blob(before), Side::Blob(after)) => (before, after),
             (Side::TooLarge, _) | (_, Side::TooLarge) => {
                 self.file_too_large(delta.address.as_str())?;
@@ -1068,11 +1229,53 @@ impl Workspace {
             reference,
         })
     }
+
+    /// The root engine's boundary: every mount name, in name order.
+    fn mount_boundary(&self) -> Vec<String> {
+        self.mounts.iter().map(|mount| mount.name.clone()).collect()
+    }
 }
 
 /// Every format package built into this core, in detection order.
 fn builtin_packages() -> Vec<Box<dyn FormatPackage>> {
     vec![Box::new(DocxPackage)]
+}
+
+/// One snapshot in one source's history: the root's when `source` is
+/// `None`, else the named mount's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSnapshot {
+    pub source: Option<String>,
+    pub snapshot: Snapshot,
+}
+
+/// The mounted sources a config names, in name order — the one order every
+/// aggregate walks.
+fn mount_names(config: &WorkspaceConfig) -> Vec<String> {
+    let mut names: Vec<String> = config
+        .sources
+        .iter()
+        .filter(|source| source.mount != ROOT_MOUNT)
+        .map(|source| source.mount.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A mount name is one path component that cannot collide with engine
+/// internals or escape the root.
+fn valid_mount_name(name: &str) -> Result<(), Error> {
+    let flat = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\');
+    if !flat || SKIP_NAMES.contains(&name) {
+        return Err(Error::Config(format!(
+            "mount name {name:?} must be one path component outside the engine's internals"
+        )));
+    }
+    Ok(())
 }
 
 fn workspace_name(root: &Path) -> String {

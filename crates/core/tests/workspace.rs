@@ -83,7 +83,7 @@ fn attach_imports_files_and_records_snapshot() {
 
     let log = ws.log(20).unwrap();
     assert!(!log.is_empty());
-    assert!(log.iter().all(|snapshot| snapshot.actor == "test-actor"));
+    assert!(log.iter().all(|entry| entry.snapshot.actor == "test-actor"));
 }
 
 #[test]
@@ -549,8 +549,8 @@ fn boundary_paths_never_appear_in_deltas_or_log() {
         assert!(!address.starts_with(".git"), "leaked: {address}");
     }
 
-    for snapshot in ws.log(50).unwrap() {
-        for parent in &snapshot.parents {
+    for entry in ws.log(50).unwrap() {
+        for parent in &entry.snapshot.parents {
             assert!(!parent.is_empty());
         }
     }
