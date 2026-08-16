@@ -381,8 +381,25 @@ impl Workspace {
                 required: policy.approvals,
             });
         }
-        self.coordination
-            .set_request_state(row.id, RequestState::Approved)?;
+        // The gate was judged satisfied on Open; another process may have
+        // moved the request since. Losing the move means re-judging, not
+        // overwriting: an already-approved request proceeds to its apply,
+        // a closed one refuses by name through the re-fetch above.
+        if !self.coordination.move_request_state(
+            row.id,
+            &[RequestState::Open],
+            RequestState::Approved,
+        )? {
+            let row = self.gated_request(id)?;
+            if let RequestState::Open = row.state {
+                // The gate re-opened (a new snapshot dismissed approvals):
+                // this approval no longer satisfies it.
+                return Ok(GateOutcome::Pending {
+                    request: self.request(id)?,
+                    required: policy.approvals,
+                });
+            }
+        }
         self.apply(&session, id, &tip, approver)
     }
 
@@ -393,9 +410,16 @@ impl Workspace {
         actor: &Actor,
         reason: Option<&str>,
     ) -> Result<LandingRequest, Error> {
+        // A rejection closes a gate still deciding: Open or Approved.
+        // Losing the move means the gate settled first — refuse by name.
         let row = self.gated_request(id)?;
-        self.coordination
-            .set_request_state(row.id, RequestState::Rejected)?;
+        while !self.coordination.move_request_state(
+            row.id,
+            &[RequestState::Open, RequestState::Approved],
+            RequestState::Rejected,
+        )? {
+            self.gated_request(id)?;
+        }
         let reference = match reason {
             Some(reason) => format!("{id} {reason}"),
             None => id.to_string(),
@@ -433,12 +457,33 @@ impl Workspace {
         self.snapshot_session(&session)?;
         let mut reference = None;
         if let Some(request) = self.coordination.gated_request_for_session(id.0)? {
-            self.coordination
-                .set_request_state(request.id, RequestState::Abandoned)?;
+            // Abandonment closes any still-gated request; losing the move
+            // means the gate settled concurrently (landed or rejected),
+            // and that outcome stands — the session still closes.
+            let _ = self.coordination.move_request_state(
+                request.id,
+                &[
+                    RequestState::Open,
+                    RequestState::Approved,
+                    RequestState::Parked,
+                ],
+                RequestState::Abandoned,
+            )?;
             reference = Some(RequestId(request.id).to_string());
         }
-        self.coordination
-            .set_session_state(id.0, SessionState::Abandoned)?;
+        if !self.coordination.move_session_state(
+            id.0,
+            SessionState::Open,
+            SessionState::Abandoned,
+        )? {
+            // A concurrent apply landed the session between the open check
+            // above and this write; the landing stands.
+            let session = self.session(id)?;
+            return Err(Error::SessionClosed {
+                id: id.to_string(),
+                state: session.state.to_string(),
+            });
+        }
         self.append_session_entry(&session.actor, Act::SessionAbandon, id, reference)?;
         self.session(id)
     }
@@ -571,8 +616,15 @@ impl Workspace {
         self.auto_snapshot()?;
         match self.engine.land(tip)? {
             LandOutcome::Conflicted => {
-                self.coordination
-                    .set_request_state(id.0, RequestState::Parked)?;
+                // Losing this move means the gate moved first — a newer
+                // snapshot re-opened it, or the session was abandoned.
+                // The winner's state stands; the parked attempt is still
+                // journaled, and the returned request carries live state.
+                let _ = self.coordination.move_request_state(
+                    id.0,
+                    &[RequestState::Approved],
+                    RequestState::Parked,
+                )?;
                 self.append_session_entry(
                     approver,
                     Act::LandParked,
@@ -584,10 +636,23 @@ impl Workspace {
                 })
             }
             LandOutcome::Landed { snapshot } => {
-                self.coordination
-                    .set_request_state(id.0, RequestState::Landed)?;
-                self.coordination
-                    .set_session_state(session.id.0, SessionState::Landed)?;
+                // The shared line advanced: that is history, whatever the
+                // store rows say. Losing the request move means the gate
+                // re-opened for a newer snapshot or the session was
+                // abandoned mid-apply — the winner's state stands and the
+                // session stays open for its remaining work; the landing
+                // is journaled either way.
+                if self.coordination.move_request_state(
+                    id.0,
+                    &[RequestState::Approved],
+                    RequestState::Landed,
+                )? {
+                    let _ = self.coordination.move_session_state(
+                        session.id.0,
+                        SessionState::Open,
+                        SessionState::Landed,
+                    )?;
+                }
                 self.append_session_entry(
                     approver,
                     Act::Land,
@@ -647,10 +712,15 @@ impl Workspace {
                 match request.state {
                     // A new snapshot re-opens the gate: an approved apply
                     // no longer covers the change, a parked conflict may
-                    // now be resolved.
-                    RequestState::Approved | RequestState::Parked => self
-                        .coordination
-                        .set_request_state(request.id, RequestState::Open)?,
+                    // now be resolved. Losing the move means the gate
+                    // closed concurrently — a closed gate stays closed.
+                    RequestState::Approved | RequestState::Parked => {
+                        let _ = self.coordination.move_request_state(
+                            request.id,
+                            &[RequestState::Approved, RequestState::Parked],
+                            RequestState::Open,
+                        )?;
+                    }
                     RequestState::Open
                     | RequestState::Landed
                     | RequestState::Rejected
