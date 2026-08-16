@@ -2,6 +2,10 @@
 
 Status: proposed (2026-08-16) — awaiting ratification (R3, [tracker])
 
+> Revised after reading celld's source (the first draft reasoned from its
+> README): the SQLite replication and fencing are not celld-internal — they
+> are `rustyriver`, an embeddable published crate this ADR now adopts.
+
 ## Context
 
 The PRD names a hosted / multi-node runtime, with celld as a candidate.
@@ -43,21 +47,26 @@ Borrow the pattern, skip the runtime:
    and git object store. Working copies are *not* replicated — they are
    derived state that rematerializes from history on the owning node,
    exactly as session working copies materialize today.
-2. **Ownership is a bucket lease.** At most one node owns a workspace at a
-   time. The lease is an object (`cells/<workspace>/lease`) taken with a
-   conditional write (`If-None-Match` create; renewal and release guarded
-   by generation/ETag match), carrying holder, generation, and expiry —
-   the landing lease's exact semantics lifted to the bucket, fencing
-   included: every replicated write names the generation it believes it
-   holds, so a node that lost its lease writes nothing. S3 has supported
-   conditional writes since late 2024; GCS always has; `object_store`
-   (already in the tree, ADR-0012) exposes both.
-3. **Replication is bucket-native.** The SQLite stores replicate via the
-   backup API into generation-named objects; jj and git object stores are
-   content-addressed, so their replication is incremental uploads of new
-   objects plus a head pointer. Replication runs on the owning node after
-   operations settle — the same "own pace, batched" posture the watcher
-   takes (docs/style.md).
+2. **Ownership and fencing are celld's own design, adopted wholesale**
+   (docs/fencing.md in denoland/celld). One ownership record per
+   workspace, written conditionally (create, then compare-and-swap);
+   every activation advances a fencing epoch; the data path writes
+   **plainly under an epoch-prefixed key** (`cells/<ws>/…/e<epoch>/`) —
+   the fence is the epoch in the key, not a condition on every request,
+   so a deposed node's writes land in a superseded lineage and cost the
+   hot path nothing. Acknowledgement re-reads the ownership record, so a
+   stale node cannot make a promise the surviving lineage does not keep.
+3. **The SQLite store replicates through `rustyriver`** — celld's own
+   embeddable crate (published on crates.io, Apache-2.0): streaming
+   WAL-to-LTX replication of a SQLite database to object storage with
+   point-in-time restore and the lease fencing above, a Rust
+   reimplementation of Litestream v0.5. We embed it in the atelier
+   daemon rather than writing replication ourselves — the wheel exists,
+   extracted, and maintained by the celld team. The jj and git object
+   stores are content-addressed, not SQLite: they replicate as plain
+   uploads plus an epoch-prefixed head pointer, under the same epoch
+   from the same ownership record. Replication runs on the owning node
+   at its own pace, batched (docs/style.md).
 4. **Serving is claiming.** Any node with bucket credentials and a token
    can claim a workspace, hydrate its stores, serve it (the existing HTTP
    face, ADR-0006 unchanged: transports add reach, never capability), and
@@ -81,6 +90,14 @@ Borrow the pattern, skip the runtime:
   celld's own evidence: the bucket alone suffices for single-writer
   ownership at workspace granularity, and no control plane means nothing
   extra to operate, shard, or lose.
+- **Writing the SQLite replication ourselves.** Rejected after reading
+  celld's code: `crates/ltx` is exactly this wheel, already extracted as
+  the embeddable `rustyriver` crate — conformance-tested backends over
+  `object_store`, point-in-time restore, the fencing design above. An
+  earlier draft of this ADR sketched a backup-API-plus-generations
+  scheme; the published crate supersedes it. The risk taken on: the
+  crate is weeks old at 0.1.0 — pinned, and hosted work does not start
+  until it proves itself under our own conformance tests.
 
 ## Consequences
 
