@@ -464,6 +464,21 @@ impl Engine {
         })
     }
 
+    /// Whether `id`'s tree differs from its first parent's — the session
+    /// change carries work on this line.
+    pub fn tree_changed(&self, id: &str) -> Result<bool, Error> {
+        let commit = self.commit_at(id)?;
+        let Some(parent_id) = commit.parent_ids().first() else {
+            return Ok(true);
+        };
+        let parent = self
+            .repo
+            .store()
+            .get_commit(parent_id)
+            .map_err(engine_err)?;
+        Ok(commit.tree_ids() != parent.tree_ids())
+    }
+
     fn wc_commit_id(&self) -> Result<CommitId, Error> {
         let name = self.ws.workspace_name().to_owned();
         match self.repo.view().get_wc_commit_id(&name) {

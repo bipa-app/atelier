@@ -44,15 +44,28 @@ pub struct Session {
     pub id: SessionId,
     pub actor: Actor,
     pub state: SessionState,
-    /// The stable identity of the session's unit of work; it survives
-    /// rewrites — amended snapshots and the landing rebase.
+    /// The stable identity of the session's unit of work on the root —
+    /// source zero; it survives rewrites — amended snapshots and the
+    /// landing rebase.
     pub change_id: String,
-    /// The session's editable directory, absolute. A real directory on
-    /// disk: sessions survive process restarts.
+    /// One change per source the session spans, root first then mounts in
+    /// name order (ADR-0009).
+    pub changes: Vec<SourceChange>,
+    /// The session's editable directory, absolute, mirroring the
+    /// workspace's shape: root files at its top, each mounted source's
+    /// working copy at `<mount>/`. A real directory on disk: sessions
+    /// survive process restarts.
     pub working_copy: PathBuf,
     pub instruction_summary: String,
     pub instruction_run_ref: Option<String>,
     pub opened_at_ms: i64,
+}
+
+/// One source's change under a session: the root's when `source` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceChange {
+    pub source: Option<String>,
+    pub change_id: String,
 }
 
 /// Where a session stands: open for work, its change landed, or closed

@@ -101,6 +101,39 @@ impl Coordination {
         Ok(())
     }
 
+    /// Record a mounted source's change under the session; the root's
+    /// change lives on the session row itself.
+    pub fn set_session_source_change(
+        &self,
+        session_id: i64,
+        source: &str,
+        change_id: &str,
+    ) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT INTO session_changes (session_id, source, change_id)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, source, change_id],
+            )
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
+    /// The session's mounted-source changes, in source order.
+    pub fn session_source_changes(&self, session_id: i64) -> Result<Vec<(String, String)>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source, change_id FROM session_changes
+                 WHERE session_id = ?1 ORDER BY source",
+            )
+            .map_err(engine_err)?;
+        let rows = stmt
+            .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(engine_err)?;
+        collect(rows)
+    }
+
     /// Move the session's state when it still holds `from`; whether the
     /// row moved. A stale writer — racing another process past the same
     /// check — loses here instead of overwriting.
