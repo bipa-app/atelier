@@ -66,8 +66,10 @@ ws.read(Address, Window, View) -> ReadResult
 ws.project(Address) -> Projection                 // cached by (blob, package, version)
 registry.packages() -> Vec<PackageId>
 
-// Watch (M3)
-ws.watch(opts) -> impl Stream<Item = WatchEvent>
+// Watch (M3) — blocking loop; external edits become attributed snapshots
+// through the same snapshot path every operation uses; a catch-up scan at
+// start owns edits made while no watcher ran; `stop` returns the loop.
+ws.watch(debounce, on_event: FnMut(&WatchEvent), stop: &WatchStop)
 ```
 
 ### Coordination is a port (ADR-0008)
