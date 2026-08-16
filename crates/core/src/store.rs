@@ -77,10 +77,15 @@ fn ensure_schema(conn: &Connection) -> Result<(), Error> {
             point TEXT PRIMARY KEY,
             holder TEXT NOT NULL,
             expires_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_state (
+            mount TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL
         );",
     )
     .map_err(engine_err)?;
-    conn.pragma_update(None, "user_version", 4)
+    conn.pragma_update(None, "user_version", 5)
         .map_err(engine_err)?;
     Ok(())
 }

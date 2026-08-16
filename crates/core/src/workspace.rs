@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use atelier_diff_core::{
     Address, Delta, DeltaKind, Diff, Fidelity, FormatPackage, PackageId, as_text, detect_package,
     diff_lines,
@@ -18,7 +20,7 @@ use crate::config::{
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
 use crate::engine::{DiffSides, Engine, FileBlob, LandOutcome, MAX_LADDER_FILE_SIZE, Side};
-use crate::error::{Error, config_err};
+use crate::error::{Error, config_err, engine_err};
 use crate::journal::{Act, Journal, JournalEntry};
 use crate::landing::{Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState};
 use crate::projection::ProjectionCache;
@@ -40,6 +42,16 @@ const LANDING_LEASE_POINT: &str = "landing";
 /// The bookmark a landing moves when no adopted branch names one; exported
 /// as a git branch so plain `git push` carries the shared line.
 const LANDED_BOOKMARK: &str = "atelier";
+/// The outcome of one sync-back attempt (ADR-0010).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// The origin now mirrors the landed snapshot.
+    Synced { snapshot: String },
+    /// The origin changed out-of-band since the last recorded sync;
+    /// nothing was written. `atelier sync --force` overwrites deliberately.
+    Parked { snapshot: String },
+}
+
 /// How long a landing lease lives; a holder that dies mid-apply frees the
 /// point when this passes.
 const LANDING_LEASE_TTL_MS: i64 = 30_000;
@@ -188,6 +200,11 @@ impl Workspace {
         write_workspace_config(&control, &config)?;
 
         let snapshot = self.engine.snapshot()?;
+        // The origin equals the import at this instant; record the
+        // fingerprint the first sync-back checks against (ADR-0010).
+        let fingerprint = folder_fingerprint(folder)?;
+        self.coordination
+            .record_sync_state(ROOT_MOUNT, &fingerprint, &self.engine.head()?)?;
         let entry = self.entry(Act::SourceAttach, snapshot)?;
         self.journal.append(&entry)?;
         Ok(source)
@@ -273,6 +290,18 @@ impl Workspace {
                 branch,
             },
         );
+
+        match kind {
+            // The origin equals the import at this instant; record the
+            // fingerprint the first sync-back checks against (ADR-0010).
+            SourceKind::LocalFolder => {
+                let fingerprint = folder_fingerprint(folder)?;
+                let head = self.mounts[position].engine.head()?;
+                self.coordination
+                    .record_sync_state(name, &fingerprint, &head)?;
+            }
+            SourceKind::LocalGit => {}
+        }
 
         let reference = snapshot.map(|id| format!("{name} {id}"));
         let entry = self.entry(Act::SourceAttach, reference)?;
@@ -1026,9 +1055,130 @@ impl Workspace {
                     session.id,
                     Some(scoped(&format!("{id} {snapshot}"))),
                 )?;
+                self.sync_after_landing(session, source, approver)?;
             }
         }
         Ok(outcome)
+    }
+
+    /// Mirror a folder source's shared line back to its origin (ADR-0010):
+    /// guarded by the recorded fingerprint unless `force`. Git sources
+    /// refuse by name - bookmark motion is their out-flow. The act is
+    /// journaled either way.
+    pub fn sync(&mut self, source: Option<&str>, force: bool) -> Result<SyncOutcome, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        let mount = source.unwrap_or(ROOT_MOUNT);
+        let config = read_workspace_config(&self.root.join(CONTROL_DIR))?;
+        let Some(entry) = config.sources.iter().find(|s| s.mount == mount) else {
+            return Err(Error::Config(format!("no source is attached at {mount:?}")));
+        };
+        match entry.kind {
+            SourceKind::LocalGit => {
+                return Err(Error::Config(format!(
+                    "{mount:?} is a git source; landed work publishes with plain git push"
+                )));
+            }
+            SourceKind::LocalFolder => {}
+        }
+        let origin = self.origin_path(&entry.path);
+        let outcome = self.sync_source(source, &origin, force)?;
+        let (act, detail) = match &outcome {
+            SyncOutcome::Synced { snapshot } => (Act::Sync, snapshot.clone()),
+            SyncOutcome::Parked { snapshot } => {
+                (Act::SyncParked, format!("{snapshot} origin changed"))
+            }
+        };
+        let reference = match source {
+            Some(name) => format!("{name} {detail}"),
+            None => detail,
+        };
+        let entry = self.entry(act, Some(reference))?;
+        self.journal.append(&entry)?;
+        Ok(outcome)
+    }
+
+    /// An origin path as configured: absolute stays; relative anchors at
+    /// the workspace root, where attach commands run.
+    fn origin_path(&self, configured: &Path) -> PathBuf {
+        if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            self.root.join(configured)
+        }
+    }
+
+    /// Export the line's head to the origin under the fingerprint guard;
+    /// no journaling - the caller records the act in its own context.
+    fn sync_source(
+        &mut self,
+        source: Option<&str>,
+        origin: &Path,
+        force: bool,
+    ) -> Result<SyncOutcome, Error> {
+        let mount = source.unwrap_or(ROOT_MOUNT);
+        let index = match source {
+            None => None,
+            Some(name) => Some(
+                self.mounts
+                    .iter()
+                    .position(|m| m.name == name)
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?,
+            ),
+        };
+        let snapshot = match index {
+            None => self.engine.head()?,
+            Some(index) => self.mounts[index].engine.head()?,
+        };
+        if !force {
+            let recorded = self.coordination.sync_state(mount)?;
+            let current = folder_fingerprint(origin)?;
+            if recorded.as_deref() != Some(current.as_str()) {
+                return Ok(SyncOutcome::Parked { snapshot });
+            }
+        }
+        match index {
+            None => self.engine.export_tree(&snapshot, origin)?,
+            Some(index) => self.mounts[index].engine.export_tree(&snapshot, origin)?,
+        }
+        let fingerprint = folder_fingerprint(origin)?;
+        self.coordination
+            .record_sync_state(mount, &fingerprint, &snapshot)?;
+        Ok(SyncOutcome::Synced { snapshot })
+    }
+
+    /// After a landing advanced a folder-sourced line, mirror it home. The
+    /// landing already stood: a dirty or unwritable origin parks the sync
+    /// in the journal and never fails the apply (ADR-0010).
+    fn sync_after_landing(
+        &mut self,
+        session: &Session,
+        source: Option<&str>,
+        approver: &Actor,
+    ) -> Result<(), Error> {
+        let mount = source.unwrap_or(ROOT_MOUNT);
+        let config = read_workspace_config(&self.root.join(CONTROL_DIR))?;
+        let Some(entry) = config.sources.iter().find(|s| s.mount == mount) else {
+            return Ok(());
+        };
+        match entry.kind {
+            SourceKind::LocalGit => return Ok(()),
+            SourceKind::LocalFolder => {}
+        }
+        let origin = self.origin_path(&entry.path);
+        let (act, detail) = match self.sync_source(source, &origin, false) {
+            Ok(SyncOutcome::Synced { snapshot }) => (Act::Sync, snapshot),
+            Ok(SyncOutcome::Parked { snapshot }) => {
+                (Act::SyncParked, format!("{snapshot} origin changed"))
+            }
+            Err(error) => (Act::SyncParked, error.to_string()),
+        };
+        let reference = match source {
+            Some(name) => format!("{name} {detail}"),
+            None => detail,
+        };
+        self.append_session_entry(approver, act, session.id, Some(reference))?;
+        Ok(())
     }
 
     /// Snapshot every source's session working copy; each source's tip.
@@ -1596,6 +1746,50 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
         current = dir.parent();
     }
     None
+}
+
+/// A deterministic digest of a folder's content: every file's relative
+/// path, kind, and bytes, sorted, engine-internal names skipped at any
+/// depth. Two folders fingerprint alike exactly when a mirror would find
+/// them identical (ADR-0010).
+fn folder_fingerprint(folder: &Path) -> Result<String, Error> {
+    let mut hasher = Sha256::new();
+    hash_folder(&mut hasher, folder, folder)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_folder(hasher: &mut Sha256, root: &Path, dir: &Path) -> Result<(), Error> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(Error::Engine(format!(
+                "cannot fingerprint a non-utf8 name at {}",
+                entry.path().display()
+            )));
+        };
+        if SKIP_NAMES.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let rel = path.strip_prefix(root).map_err(engine_err)?;
+        if file_type.is_dir() {
+            hash_folder(hasher, root, &path)?;
+        } else if file_type.is_symlink() {
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([1]);
+            hasher.update(fs::read_link(&path)?.to_string_lossy().as_bytes());
+            hasher.update([0]);
+        } else {
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([2]);
+            hasher.update(fs::read(&path)?);
+            hasher.update([0]);
+        }
+    }
+    Ok(())
 }
 
 /// The branch the adopted repository has checked out: the symbolic ref in
