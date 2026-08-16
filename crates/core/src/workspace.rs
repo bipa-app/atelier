@@ -210,12 +210,25 @@ impl Workspace {
         self.auto_snapshot()?;
 
         fs::create_dir_all(&mount_dir)?;
-        let mut engine = Engine::init(&mount_dir, &self.actor, &[])?;
-        copy_tree(folder, &mount_dir)?;
+        // A folder that is already a git repository is adopted, never
+        // imported: its history is preserved and the mount stays a real
+        // repo plain git pushes (ADR-0009).
+        let adopts_git = folder.join(".git").is_dir();
+        let (kind, mut engine) = if adopts_git {
+            copy_tree_with_git(folder, &mount_dir)?;
+            (
+                SourceKind::LocalGit,
+                Engine::adopt_git(&mount_dir, &self.actor, &[])?,
+            )
+        } else {
+            let engine = Engine::init(&mount_dir, &self.actor, &[])?;
+            copy_tree(folder, &mount_dir)?;
+            (SourceKind::LocalFolder, engine)
+        };
         let snapshot = engine.snapshot()?;
 
         let source = Source {
-            kind: SourceKind::LocalFolder,
+            kind,
             path: folder.to_path_buf(),
             sync: SyncPolicy::TwoWay,
             mount: name.to_owned(),
@@ -1317,6 +1330,28 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
         if from.is_dir() {
             fs::create_dir_all(&to)?;
             copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy a source tree keeping its `.git` — the adoption path needs the
+/// repository itself, not just its files. `.atelier` and `.jj` still stay
+/// behind: they are engine internals, never source content.
+fn copy_tree_with_git(src: &Path, dst: &Path) -> Result<(), Error> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".atelier" || name == ".jj" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            fs::create_dir_all(&to)?;
+            copy_tree_with_git(&from, &to)?;
         } else {
             fs::copy(&from, &to)?;
         }

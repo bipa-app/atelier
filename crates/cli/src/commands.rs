@@ -35,9 +35,10 @@ enum Command {
     Diff,
     /// Show recent workspace acts.
     Journal,
-    /// Show the shared line's snapshots, newest first. History records
-    /// content states; the journal records acts and intent.
-    History,
+    /// Show the shared lines' snapshots, newest first — every source's,
+    /// or one mount's. History records content states; the journal
+    /// records acts and intent.
+    History { source: Option<String> },
     /// Show every session, newest first.
     Sessions,
     /// Show every landing request, newest first.
@@ -83,7 +84,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Attach { folder, mount } => attach(&folder, mount.as_deref()),
         Command::Diff => diff(),
         Command::Journal => journal(),
-        Command::History => history(),
+        Command::History { source } => history(source.as_deref()),
         Command::Sessions => sessions(),
         Command::Requests => requests(),
         Command::Approve { request } => approve(&request),
@@ -155,12 +156,16 @@ fn journal() -> Result<Vec<String>> {
         .collect()
 }
 
-fn history() -> Result<Vec<String>> {
+fn history(source: Option<&str>) -> Result<Vec<String>> {
     let mut workspace = open_current()?;
 
-    workspace
+    let lines: Vec<String> = workspace
         .log(HISTORY_LIMIT)?
         .iter()
+        .filter(|entry| match source {
+            Some(source) => entry.source.as_deref() == Some(source),
+            None => true,
+        })
         .map(|entry| {
             let line = format!(
                 "{}  {}  {}",
@@ -168,14 +173,18 @@ fn history() -> Result<Vec<String>> {
                 entry.snapshot.actor,
                 format_rfc3339_utc(entry.snapshot.at_ms)?
             );
-            // A mounted source's line carries its mount; root lines keep
-            // the exact v1 shape.
-            Ok(printable(&match &entry.source {
-                Some(source) => format!("{source}  {line}"),
-                None => line,
+            // A mounted source's line carries its mount when every source
+            // lists; a single source's listing keeps the bare v1 shape.
+            Ok(printable(&match (&entry.source, source) {
+                (Some(mount), None) => format!("{mount}  {line}"),
+                _ => line,
             }))
         })
-        .collect()
+        .collect::<Result<Vec<String>>>()?;
+    if let (true, Some(source)) = (lines.is_empty(), source) {
+        bail!("no source is mounted at {source:?}");
+    }
+    Ok(lines)
 }
 
 fn sessions() -> Result<Vec<String>> {

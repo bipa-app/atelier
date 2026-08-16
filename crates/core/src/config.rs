@@ -126,12 +126,14 @@ pub(crate) const ROOT_MOUNT: &str = "/";
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
     LocalFolder,
+    LocalGit,
 }
 
 impl fmt::Display for SourceKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LocalFolder => f.write_str("local-folder"),
+            Self::LocalGit => f.write_str("local-git"),
         }
     }
 }
