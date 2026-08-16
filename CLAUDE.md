@@ -47,6 +47,15 @@ the listed synonyms), [`docs/api.md`](docs/api.md) (behavior contracts and edge-
 8. **No `#[allow]`.** Lint policy lives in `Cargo.toml` (`[workspace.lints]`) and
    `clippy.toml`. A principled per-site exception is `#[expect(lint, reason = "…")]` — the
    reason is mandatory and the lint must actually fire.
+9. **Guard writes that move a state machine.** The write names the expected prior state in
+   its predicate (`… SET state = 'landed' WHERE id = ? AND state = 'approved'`), so a stale
+   writer fails instead of overwriting — the pattern the lease claim and approval dismissal
+   already follow (`AND dismissed = 0`).
+10. **No side effects inside a store transaction.** A transaction block reads and writes the
+   store — never the filesystem, a package, or the network. Whatever must happen on commit
+   happens after it.
+11. **Direct params up to seven.** Past seven — or when same-typed params are easy to mix
+   up — take a params struct. Typed values (rule 1) keep most signatures short first.
 
 ## Quality gates (MUST before landing)
 
@@ -76,7 +85,9 @@ inside `#[test]` functions only — helpers in `tests/*.rs` files are not covere
 5. **Use production code in tests; never build helpers that mirror production code.**
 6. **Pin distinctness.** When a rule exists so two inputs stay distinguishable, the test
    asserts both exact outputs *and* `assert_ne!` between them.
-7. **Real documents stay local.** `fixtures/real/` is gitignored; the ignored
+7. **Cover state machine transitions**: the legal ones land, and each illegal one refuses by
+   name — an untested transition is an untested promise.
+8. **Real documents stay local.** `fixtures/real/` is gitignored; the ignored
    `real_documents` test asserts structure, never content — confidential fixtures and their
    text never enter the repository. Run with
    `cargo test -p atelier-cli --test real_documents -- --ignored`.
