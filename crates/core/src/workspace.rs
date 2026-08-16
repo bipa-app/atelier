@@ -66,6 +66,15 @@ fn unreachable_remote<T>() -> Result<T, Error> {
     ))
 }
 
+/// The outcome of one pull attempt (ADR-0012, R2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullOutcome {
+    /// The bucket's changes folded into the line as this snapshot.
+    Pulled { snapshot: String },
+    /// The bucket already matches the last sync; nothing to fold.
+    Current,
+}
+
 /// Where a sync-back writes: a folder origin on this machine, or a
 /// bucket prefix behind the remote adapter (ADR-0012).
 enum SyncTarget {
@@ -1339,6 +1348,67 @@ impl Workspace {
         }
     }
 
+    /// Fold bucket-side changes into a mounted remote source's line as one
+    /// attributed snapshot (ADR-0012, R2). A line that moved locally since
+    /// its last sync refuses by name - land or sync it first; nothing is
+    /// pulled over unlanded movement, and the pull's own auto-snapshot
+    /// means outstanding edits count as movement, never as loss.
+    pub fn pull(&mut self, source: Option<&str>) -> Result<PullOutcome, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        let mount = source.unwrap_or(ROOT_MOUNT);
+        let config = read_workspace_config(&self.root.join(CONTROL_DIR))?;
+        let Some(entry) = config.sources.iter().find(|s| s.mount == mount) else {
+            return Err(Error::Config(format!("no source is attached at {mount:?}")));
+        };
+        match entry.kind {
+            SourceKind::Remote => {}
+            SourceKind::LocalFolder | SourceKind::LocalGit => {
+                return Err(Error::Config(format!(
+                    "{mount:?} is not a remote source; folders reconcile with atelier sync and git sources pull with plain git"
+                )));
+            }
+        }
+        let index = self
+            .mounts
+            .iter()
+            .position(|m| m.name == mount)
+            .ok_or_else(|| Error::Engine(format!("no source is mounted at {mount:?}")))?;
+        let remote = RemoteFolder::open(&entry.path.display().to_string()).map_err(engine_err)?;
+        let Some((recorded, last_synced)) = self.coordination.sync_state(mount)? else {
+            return Err(Error::Config(format!(
+                "{mount:?} has no sync record; atelier sync --force seeds one"
+            )));
+        };
+        if remote.fingerprint().map_err(engine_err)? == recorded {
+            return Ok(PullOutcome::Current);
+        }
+        let head = self.mounts[index].engine.head()?;
+        if head != last_synced {
+            return Err(Error::Config(format!(
+                "{mount:?} moved locally since its last sync ({head}); land or sync it first, then pull"
+            )));
+        }
+        let mount_dir = self.root.join(mount);
+        remote.download_mirror(&mount_dir).map_err(engine_err)?;
+        let Some(snapshot) = self.mounts[index].engine.snapshot()? else {
+            // The listing changed without the content changing (an ETag
+            // rewrite); the record catches up, the line stays put.
+            let fingerprint = remote.fingerprint().map_err(engine_err)?;
+            self.coordination
+                .record_sync_state(mount, &fingerprint, &head)?;
+            return Ok(PullOutcome::Current);
+        };
+        // The window between mirror and this listing is ADR-0012's; the
+        // record names what the pull believes the bucket held.
+        let fingerprint = remote.fingerprint().map_err(engine_err)?;
+        self.coordination
+            .record_sync_state(mount, &fingerprint, &snapshot)?;
+        let entry = self.entry(Act::Pull, Some(format!("{mount} {snapshot}")))?;
+        self.journal.append(&entry)?;
+        Ok(PullOutcome::Pulled { snapshot })
+    }
+
     /// Mirror a folder source's shared line back to its origin (ADR-0010):
     /// guarded by the recorded fingerprint unless `force`. Git sources
     /// refuse by name - bookmark motion is their out-flow. The act is
@@ -1421,7 +1491,7 @@ impl Workspace {
                 }
                 (SyncTarget::Remote(_), None) => unreachable_remote()?,
             };
-            if recorded.as_deref() != Some(current.as_str()) {
+            if recorded.map(|(fingerprint, _)| fingerprint) != Some(current) {
                 return Ok(SyncOutcome::Parked { snapshot });
             }
         }

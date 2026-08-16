@@ -230,7 +230,10 @@ fn route(
         }
         _ => match path.strip_prefix("/v1/requests/") {
             Some(rest) => request_route(workspace, method, rest, body),
-            None => session_route(workspace, method, path, query, body),
+            None => match path.strip_prefix("/v1/sources/") {
+                Some(rest) => source_route(workspace, method, rest, body),
+                None => session_route(workspace, method, path, query, body),
+            },
         },
     }
 }
@@ -246,6 +249,25 @@ fn text_model(model: Result<String, Error>) -> Route {
             Route::Text { status: 200, body }
         }
         Err(error) => error_route(500, &error.to_string()),
+    }
+}
+
+/// The `/v1/sources/{mount}/…` routes: how content moves between a line
+/// and its origin. The body may carry `force` for a sync.
+fn source_route(workspace: &mut Workspace, method: &Method, rest: &str, body: &str) -> Route {
+    let Some((mount, action)) = rest.split_once('/') else {
+        return error_route(404, "no such resource");
+    };
+    let mut args = match parse_args(body) {
+        Value::Object(map) => Value::Object(map),
+        Value::Null => json!({}),
+        _ => return error_route(400, "the body must be a json object"),
+    };
+    args["source"] = json!(mount);
+    match (method, action) {
+        (Method::Post, "sync") => json_call(workspace, "sync", &args),
+        (Method::Post, "pull") => json_call(workspace, "pull", &args),
+        _ => error_route(404, "no such resource"),
     }
 }
 

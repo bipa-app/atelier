@@ -146,6 +146,37 @@ impl RemoteFolder {
         })
     }
 
+    /// Mirror the bucket into `target`: download every object, then remove
+    /// local files the listing lacks and prune emptied directories.
+    /// Engine-internal names never travel in either direction.
+    pub fn download_mirror(&self, target: &FsPath) -> Result<(), RemoteError> {
+        self.download_all(target)?;
+        let remote = self.runtime.block_on(self.keys())?;
+        let local = local_files(target)?;
+        let mut directories = BTreeSet::new();
+        for stale in local.difference(&remote) {
+            let path = target.join(stale);
+            fs::remove_file(&path).map_err(remote_err)?;
+            let mut parent = path.parent();
+            while let Some(dir) = parent {
+                if dir == target {
+                    break;
+                }
+                directories.insert(dir.to_path_buf());
+                parent = dir.parent();
+            }
+        }
+        // Deepest first, so an emptied child empties its parent in turn.
+        let mut directories: Vec<_> = directories.into_iter().collect();
+        directories.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+        for dir in directories {
+            if fs::read_dir(&dir).map_err(remote_err)?.next().is_none() {
+                fs::remove_dir(&dir).map_err(remote_err)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The object path a key names beneath the prefix.
     fn object_path(&self, key: &str) -> ObjectPath {
         if self.prefix.as_ref().is_empty() {

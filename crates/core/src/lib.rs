@@ -31,4 +31,4 @@ pub use read::{READ_WINDOW_MAX, ReadResult, ReadWindow};
 pub use render::{printable, render_diff};
 pub use session::{Instruction, Session, SessionId, SessionState, SourceChange};
 pub use watch::{WatchEvent, WatchStop};
-pub use workspace::{Snapshot, SourceSnapshot, SyncOutcome, Workspace};
+pub use workspace::{PullOutcome, Snapshot, SourceSnapshot, SyncOutcome, Workspace};

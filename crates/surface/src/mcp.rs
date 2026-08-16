@@ -163,20 +163,20 @@ pub(crate) fn dispatch(
             let id = request_id(args)?;
             Ok(undo_json(id, &workspace.undo(id)?))
         }
-        "landing_requests" => {
-            let requests: Vec<Value> = workspace
-                .landing_requests()?
-                .iter()
-                .map(request_json)
-                .collect();
-            Ok(json!({"requests": requests}))
-        }
+        "landing_requests" => Ok(requests_json(workspace)?),
         "journal" => {
             let limit = optional_usize(args, "limit")?.unwrap_or(JOURNAL_LIMIT);
             let entries: Vec<Value> = workspace.journal(limit)?.iter().map(entry_json).collect();
             Ok(json!({"entries": entries}))
         }
         "abandon" => Ok(session_state_json(&workspace.abandon(session_id(args)?)?)),
+        "sync" => {
+            let force = args["force"].as_bool().unwrap_or(false);
+            Ok(sync_json(
+                &workspace.sync(optional_str(args, "source")?, force)?,
+            ))
+        }
+        "pull" => Ok(pull_json(&workspace.pull(optional_str(args, "source")?)?)),
         _ => Err(ToolFailure::UnknownTool),
     }
 }
@@ -198,6 +198,38 @@ fn instruction_args(args: &Value) -> Result<Instruction, ToolFailure> {
         run_ref: optional_str(args, "instruction_run_ref")?.map(str::to_owned),
         verbatim: optional_str(args, "instruction_verbatim")?.map(str::to_owned),
     })
+}
+
+/// Every landing request as the wire carries them, newest first.
+fn requests_json(workspace: &mut Workspace) -> Result<Value, ToolFailure> {
+    let requests: Vec<Value> = workspace
+        .landing_requests()?
+        .iter()
+        .map(request_json)
+        .collect();
+    Ok(json!({"requests": requests}))
+}
+
+/// A sync outcome as the wire carries it (ADR-0010).
+fn sync_json(outcome: &atelier_core::SyncOutcome) -> Value {
+    match outcome {
+        atelier_core::SyncOutcome::Synced { snapshot } => {
+            json!({"state": "synced", "snapshot_id": snapshot})
+        }
+        atelier_core::SyncOutcome::Parked { snapshot } => {
+            json!({"state": "parked", "snapshot_id": snapshot})
+        }
+    }
+}
+
+/// A pull outcome as the wire carries it (ADR-0012).
+fn pull_json(outcome: &atelier_core::PullOutcome) -> Value {
+    match outcome {
+        atelier_core::PullOutcome::Pulled { snapshot } => {
+            json!({"state": "pulled", "snapshot_id": snapshot})
+        }
+        atelier_core::PullOutcome::Current => json!({"state": "current"}),
+    }
 }
 
 /// A session's identity and state as the wire carries them.
@@ -382,7 +414,33 @@ fn tool_definitions() -> Value {
     let mut tools = read_model_tools();
     tools.extend(session_tools());
     tools.extend(gate_tools());
+    tools.extend(source_tools());
     Value::Array(tools)
+}
+
+/// The source verbs: how content moves between a line and its origin.
+fn source_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "sync",
+            "description": "Mirror a folder or remote source's shared line back to its origin; parks when the origin changed out-of-band (force overwrites deliberately, ADR-0010/0012).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "The mounted source; the root import when omitted"},
+                    "force": {"type": "boolean"}
+                }
+            }
+        }),
+        json!({
+            "name": "pull",
+            "description": "Fold bucket-side changes into a mounted remote source's line as one attributed snapshot; refuses when the line moved locally since its last sync (ADR-0012).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}}
+            }
+        }),
+    ]
 }
 
 /// The read models: what an actor consults before and while it works.

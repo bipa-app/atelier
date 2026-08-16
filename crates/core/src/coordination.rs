@@ -267,13 +267,14 @@ impl Coordination {
         Ok(moved == 1)
     }
 
-    /// The origin fingerprint a source last synced at, if it ever has.
-    pub fn sync_state(&self, mount: &str) -> Result<Option<String>, Error> {
+    /// The origin fingerprint and line snapshot a source last synced at,
+    /// if it ever has.
+    pub fn sync_state(&self, mount: &str) -> Result<Option<(String, String)>, Error> {
         self.conn
             .query_row(
-                "SELECT fingerprint FROM sync_state WHERE mount = ?1",
+                "SELECT fingerprint, snapshot_id FROM sync_state WHERE mount = ?1",
                 params![mount],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(engine_err)
