@@ -753,6 +753,9 @@ struct Document<'a> {
     blocks: Vec<String>,
     paragraph: Option<Paragraph>,
     in_properties: bool,
+    /// Inside a run's `w:rPr` — never the paragraph mark's `w:pPr/w:rPr`,
+    /// whose formatting belongs to the mark, not to any text.
+    in_run_properties: bool,
     in_row_properties: bool,
     in_cell_properties: bool,
     in_text: bool,
@@ -774,6 +777,51 @@ struct Document<'a> {
     tables: Vec<Table>,
 }
 
+/// The direct emphasis a run's `w:rPr` declares. Styles-applied emphasis
+/// is not projected in v1 — only formatting the document names on the run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Emphasis {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+}
+
+impl Emphasis {
+    fn plain(self) -> bool {
+        self == Self::default()
+    }
+
+    /// Opening markers, outermost first: strike, bold, italic — one
+    /// canonical nesting whatever order the properties appeared in.
+    fn opening(self) -> String {
+        let mut markers = String::new();
+        if self.strike {
+            markers.push_str("~~");
+        }
+        if self.bold {
+            markers.push_str("**");
+        }
+        if self.italic {
+            markers.push('*');
+        }
+        markers
+    }
+
+    fn closing(self) -> String {
+        let mut markers = String::new();
+        if self.italic {
+            markers.push('*');
+        }
+        if self.bold {
+            markers.push_str("**");
+        }
+        if self.strike {
+            markers.push_str("~~");
+        }
+        markers
+    }
+}
+
 #[derive(Default)]
 struct Paragraph {
     style: Option<String>,
@@ -781,10 +829,77 @@ struct Paragraph {
     listed: bool,
     num_id: Option<String>,
     level: usize,
+    /// Assembled paragraph markdown: inline-escaped text plus bare
+    /// emphasis markers. Only line-leading structure remains to escape.
     text: String,
+    /// The open span: consecutive content under one emphasis. Word splits
+    /// visually identical text into arbitrary runs (proofing state does),
+    /// so spans merge across runs — equal documents project equally.
+    span: String,
+    span_emphasis: Emphasis,
+    /// What the current run's `w:rPr` declared for its content.
+    run: Emphasis,
     /// A tracked deletion of the paragraph mark: accepting it merges this
     /// paragraph's text into the next.
     mark_deleted: bool,
+}
+
+impl Paragraph {
+    /// Append run content: inline-escaped into the open span, hard breaks
+    /// closing it — markers never cross lines. A change of emphasis since
+    /// the span opened closes it first.
+    fn append(&mut self, content: &str) {
+        let mut first = true;
+        for segment in content.split('\n') {
+            if !first {
+                self.break_line();
+            }
+            first = false;
+            if segment.is_empty() {
+                continue;
+            }
+            if self.run != self.span_emphasis {
+                self.flush_span();
+                self.span_emphasis = self.run;
+            }
+            self.span.push_str(&escaped_inline(segment));
+        }
+    }
+
+    fn break_line(&mut self) {
+        self.flush_span();
+        self.text.push('\n');
+    }
+
+    /// Close the open span, wrapping its non-whitespace core in emphasis
+    /// markers. Markdown emphasis cannot flank whitespace: a span's edge
+    /// whitespace renders outside its markers, and emphasis on whitespace
+    /// alone projects as plain whitespace — Word shows a formatted space
+    /// as a space, and property-only differences like it are the Rich
+    /// rung's to carry, not the text rung's.
+    fn flush_span(&mut self) {
+        let span = std::mem::take(&mut self.span);
+        if span.is_empty() {
+            return;
+        }
+        if self.span_emphasis.plain() {
+            self.text.push_str(&span);
+            return;
+        }
+        let kept = span.trim_end();
+        let (kept, trail) = span.split_at(kept.len());
+        let lead_len = kept.len() - kept.trim_start().len();
+        let (lead, core) = kept.split_at(lead_len);
+        if core.is_empty() {
+            self.text.push_str(&span);
+            return;
+        }
+        self.text.push_str(lead);
+        self.text.push_str(&self.span_emphasis.opening());
+        self.text.push_str(core);
+        self.text.push_str(&self.span_emphasis.closing());
+        self.text.push_str(trail);
+    }
 }
 
 #[derive(Default)]
@@ -820,6 +935,7 @@ impl<'a> Document<'a> {
             blocks: Vec::new(),
             paragraph: None,
             in_properties: false,
+            in_run_properties: false,
             in_row_properties: false,
             in_cell_properties: false,
             in_text: false,
@@ -904,15 +1020,36 @@ impl<'a> Document<'a> {
                     paragraph.level = list_level(&level)?;
                 }
             }
+            b"r" => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.run = Emphasis::default();
+                }
+            }
+            b"rPr" if !self.in_properties => self.in_run_properties = true,
+            b"b" if self.in_run_properties => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.run.bold = on_off(attribute(reader, start, b"val")?.as_deref())?;
+                }
+            }
+            b"i" if self.in_run_properties => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.run.italic = on_off(attribute(reader, start, b"val")?.as_deref())?;
+                }
+            }
+            b"strike" if self.in_run_properties => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.run.strike = on_off(attribute(reader, start, b"val")?.as_deref())?;
+                }
+            }
             b"t" => self.in_text = true,
             b"tab" if !self.in_properties => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.text.push('\t');
+                    paragraph.append("\t");
                 }
             }
             b"br" | b"cr" => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.text.push('\n');
+                    paragraph.break_line();
                 }
             }
             // Visible inline characters Word encodes as elements: erasing
@@ -922,17 +1059,17 @@ impl<'a> Document<'a> {
                     let value = attribute(reader, start, b"char")?.ok_or_else(|| {
                         DocxError::Structure("sym without a char attribute".to_owned())
                     })?;
-                    paragraph.text.push(sym_char(&value)?);
+                    paragraph.append(&sym_char(&value)?.to_string());
                 }
             }
             b"noBreakHyphen" if !self.in_properties => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.text.push('\u{2011}');
+                    paragraph.append("\u{2011}");
                 }
             }
             b"softHyphen" if !self.in_properties => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.text.push('\u{00ad}');
+                    paragraph.append("\u{00ad}");
                 }
             }
             b"tbl" => self.tables.push(Table::default()),
@@ -966,6 +1103,7 @@ impl<'a> Document<'a> {
         }
         match local_name {
             b"pPr" => self.in_properties = false,
+            b"rPr" => self.in_run_properties = false,
             b"trPr" => self.in_row_properties = false,
             b"tcPr" => self.in_cell_properties = false,
             b"t" => self.in_text = false,
@@ -973,6 +1111,7 @@ impl<'a> Document<'a> {
                 let mut paragraph = self.paragraph.take().ok_or_else(|| {
                     DocxError::Structure("paragraph end without a paragraph".to_owned())
                 })?;
+                paragraph.flush_span();
                 // Paragraphs inside a deleted row or cell neither consume
                 // nor produce merge text: their content — even under a
                 // deleted paragraph mark — never reaches the accepted
@@ -1022,7 +1161,7 @@ impl<'a> Document<'a> {
         }
         match self.paragraph.as_mut() {
             Some(paragraph) => {
-                paragraph.text.push_str(content);
+                paragraph.append(content);
                 Ok(())
             }
             None => Err(DocxError::Structure("text outside a paragraph".to_owned())),
@@ -1266,6 +1405,7 @@ impl<'a> Document<'a> {
         if self.paragraph.is_some()
             || self.in_text
             || self.in_properties
+            || self.in_run_properties
             || self.in_row_properties
             || self.in_cell_properties
             || self.skipping > 0
@@ -1289,10 +1429,45 @@ impl<'a> Document<'a> {
     }
 }
 
-/// Plain body text whose lines begin with markdown structure — `# `,
-/// `1. `, `- `, `>`, `|`, a thematic break — escapes the marker, so a
-/// paragraph that merely *says* "1. Scope" stays distinguishable from a
-/// real list item and the two can never project identically.
+/// Inline characters that could impersonate emphasis markers — `*`, `_`,
+/// `~` — escape wherever they appear, backslashes first so a generated
+/// escape never collides with a literal one. Markers are inserted after
+/// this, so a bare `*` or `~` in a projection is always a marker and a
+/// document that literally says `**x**` never projects like bold `x`.
+fn escaped_inline(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '*' => escaped.push_str("\\*"),
+            '_' => escaped.push_str("\\_"),
+            '~' => escaped.push_str("\\~"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// An `ST_OnOff` toggle value: an absent `w:val` turns the property on,
+/// as Word reads it. Anything outside the schema's lexicon is malformed —
+/// guessing would project silently wrong emphasis.
+fn on_off(value: Option<&str>) -> Result<bool, DocxError> {
+    match value {
+        None | Some("1" | "true" | "on") => Ok(true),
+        Some("0" | "false" | "off") => Ok(false),
+        Some(other) => Err(DocxError::Structure(format!(
+            "on/off value {other:?} is outside ST_OnOff"
+        ))),
+    }
+}
+
+/// Assembled paragraph lines whose first characters could impersonate
+/// line-leading markdown structure — `# `, `1. `, `- `, `>`, `|`, a fence
+/// — escape the marker, so a paragraph that merely *says* "1. Scope"
+/// stays distinguishable from a real list item and the two can never
+/// project identically. Inline channels (`\`, `*`, `_`, `~`) escaped at
+/// span assembly; a line-leading `*` or `~` here is an emphasis marker
+/// and must stay one.
 fn escaped_markdown(text: &str) -> String {
     let escaped: Vec<String> = text
         .split('\n')
@@ -1312,20 +1487,16 @@ fn escaped_markdown(text: &str) -> String {
 }
 
 fn escaped_markdown_line(line: &str) -> String {
-    // Literal backslashes escape first, so a generated escape can never
-    // collide with one the document text already contained — the mapping
-    // from body text to markdown stays injective.
-    let line = line.replace('\\', "\\\\");
     let trimmed = line.trim_start();
     let indent = &line[..line.len() - trimmed.len()];
     let mut chars = trimmed.chars();
     let Some(first) = chars.next() else {
-        return line;
+        return line.to_owned();
     };
     let second = chars.next();
     let escapes = match first {
-        '#' | '>' | '|' | '`' | '~' => true,
-        '-' | '+' | '*' | '_' => second.is_none_or(|c| c == ' ' || c == '\t' || c == first),
+        '#' | '>' | '|' | '`' => true,
+        '-' | '+' => second.is_none_or(|c| c == ' ' || c == '\t' || c == first),
         '0'..='9' => {
             let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
             matches!(
@@ -1336,7 +1507,7 @@ fn escaped_markdown_line(line: &str) -> String {
         _ => false,
     };
     if !escapes {
-        return line;
+        return line.to_owned();
     }
     if first.is_ascii_digit() {
         let digits = trimmed.chars().take_while(char::is_ascii_digit).count();

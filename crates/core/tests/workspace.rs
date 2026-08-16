@@ -214,7 +214,7 @@ fn changed_docx_raises_to_text_rung_carrying_its_package_and_reuses_the_cache() 
     assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
     assert_eq!(
         diff.deltas[0].package.map(|package| package.to_string()),
-        Some("format-docx@0.1.0".to_owned())
+        Some("format-docx@0.2.0".to_owned())
     );
 
     // The second diff of the same snapshots serves both sides from the
@@ -383,7 +383,7 @@ fn failing_package_falls_back_to_binary_and_journals_the_failure() {
         .expect("the fallback must be journaled");
     let reference = failure.reference.as_deref().expect("reference names it");
     assert!(reference.contains("broken.docx"), "got: {reference}");
-    assert!(reference.contains("format-docx@0.1.0"), "got: {reference}");
+    assert!(reference.contains("format-docx@0.2.0"), "got: {reference}");
     assert!(
         reference.contains("fell_back_to=binary"),
         "got: {reference}"

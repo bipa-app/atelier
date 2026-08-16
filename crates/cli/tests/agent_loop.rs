@@ -400,7 +400,7 @@ fn mcp_reads_are_windowed_and_documents_read_as_projections() {
         read["content"],
         "The quick brown fox jumps over the lazy dog.\n"
     );
-    assert_eq!(read["projected_by"], "format-docx@0.1.0");
+    assert_eq!(read["projected_by"], "format-docx@0.2.0");
 
     // Opaque bytes without a package refuse instead of degrading.
     fs::write(working_copy.join("blob.bin"), [0xff_u8, 0xfe, 0x00, 0x01])

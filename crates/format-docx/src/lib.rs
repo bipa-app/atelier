@@ -3,9 +3,12 @@
 //! Projector only in v1: the accepted body — paragraphs, headings, lists,
 //! tables — renders to deterministic markdown. Tracked changes resolve to
 //! the accepted body: pending deletions and pre-revision properties are
-//! excluded, pending insertions included. Inline formatting and comments
-//! are not projected. With no differ yet, the ladder diffs docx documents
-//! at the text rung over these projections.
+//! excluded, pending insertions included. Run emphasis a document names
+//! directly — bold, italic, strikethrough — projects as markdown emphasis;
+//! formatting markdown cannot express (font size, family, color,
+//! underline) and styles-applied emphasis are not projected, nor are
+//! comments. With no differ yet, the ladder diffs docx documents at the
+//! text rung over these projections.
 
 mod projection;
 
