@@ -190,3 +190,129 @@ fn mount_refusals_speak_by_name() {
     let error = ws.attach(import.path()).unwrap_err();
     assert!(matches!(error, Error::AlreadyAttached), "got: {error:?}");
 }
+
+/// A git repository fixture with two commits; the two ids, oldest first.
+fn git_repo(dir: &Path) -> Vec<String> {
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "upstream")
+            .env("GIT_AUTHOR_EMAIL", "upstream@example.com")
+            .env("GIT_COMMITTER_NAME", "upstream")
+            .env("GIT_COMMITTER_EMAIL", "upstream@example.com")
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).expect("git output is utf-8")
+    };
+    git(&["init", "-q", "-b", "master", "."]);
+    fs::write(dir.join("lib.rs"), "pub fn lib() {}\n").expect("write repo file");
+    git(&["add", "."]);
+    git(&["commit", "-qm", "the pre-attach commit"]);
+    let first = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fs::write(dir.join("README.md"), "readme\n").expect("write repo file");
+    git(&["add", "."]);
+    git(&["commit", "-qm", "second pre-attach commit"]);
+    let second = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    vec![first, second]
+}
+
+#[test]
+fn a_git_repo_source_is_adopted_with_its_history() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    let pre_attach = git_repo(repo.path());
+
+    let source = ws.attach_mount(repo.path(), "sdk").unwrap();
+    assert_eq!(source.kind.to_string(), "local-git");
+
+    // The adopted history is the mount's history: both pre-attach commits
+    // list beneath the adoption, authorship preserved.
+    let sdk_ids: Vec<String> = ws
+        .log(50)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.source.as_deref() == Some("sdk"))
+        .map(|e| e.snapshot.id)
+        .collect();
+    assert!(
+        sdk_ids.contains(&pre_attach[0]) && sdk_ids.contains(&pre_attach[1]),
+        "pre-attach commits missing from {sdk_ids:?}"
+    );
+    let upstream = ws
+        .log(50)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.snapshot.id == pre_attach[0])
+        .expect("the first pre-attach commit lists");
+    assert_eq!(upstream.snapshot.actor, "upstream");
+
+    // A new edit snapshots into the adopted line, and plain git sees the
+    // settled history: every snapshot but the open working-copy commit.
+    fs::write(
+        root.path().join("sdk").join("lib.rs"),
+        "pub fn lib() { work() }\n",
+    )
+    .unwrap();
+    ws.journal(1).unwrap();
+    let git_log = std::process::Command::new("git")
+        .args(["log", "--format=%H"])
+        .current_dir(root.path().join("sdk"))
+        .output()
+        .expect("run git log");
+    assert!(git_log.status.success());
+    let seen = String::from_utf8(git_log.stdout).expect("git log is utf-8");
+    assert!(
+        seen.contains(&pre_attach[0]) && seen.contains(&pre_attach[1]),
+        "git log lost the adopted history: {seen}"
+    );
+
+    // The mount stays a repo plain git pushes (story 14, per project).
+    let bare = tempfile::tempdir().unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "--bare", "."])
+        .current_dir(bare.path())
+        .output()
+        .expect("init bare remote");
+    assert!(init.status.success());
+    let push = std::process::Command::new("git")
+        .args([
+            "push",
+            "-q",
+            bare.path().to_str().expect("utf-8 path"),
+            "master",
+        ])
+        .current_dir(root.path().join("sdk"))
+        .output()
+        .expect("push from the mount");
+    assert!(push.status.success(), "push failed: {push:?}");
+}
+
+#[test]
+fn an_lfs_git_source_refuses_at_attach() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    fs::write(
+        repo.path().join(".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .unwrap();
+
+    let error = ws.attach_mount(repo.path(), "sdk").unwrap_err();
+    assert!(
+        matches!(error, Error::LfsSourceUnsupported),
+        "got: {error:?}"
+    );
+}
