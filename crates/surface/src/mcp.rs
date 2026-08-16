@@ -282,9 +282,9 @@ fn request_json(request: &LandingRequest) -> Value {
 
 fn outcome_json(outcome: &GateOutcome) -> Value {
     match outcome {
-        GateOutcome::Landed { snapshot } => json!({
+        GateOutcome::Landed { landings } => json!({
             "state": "landed",
-            "snapshot_id": snapshot,
+            "landings": landings_json(landings),
         }),
         GateOutcome::Pending { request, required } => json!({
             "state": "pending",
@@ -292,10 +292,36 @@ fn outcome_json(outcome: &GateOutcome) -> Value {
             "approvals": request.approvals.len(),
             "required": required,
         }),
-        GateOutcome::Parked { request } => json!({
+        GateOutcome::Parked {
+            request,
+            landings,
+            parked,
+        } => json!({
             "state": "parked",
             "request_id": request.id.to_string(),
+            "landings": landings_json(landings),
+            "parked": parked.iter().map(|source| source_json(source.as_deref())).collect::<Vec<Value>>(),
         }),
+    }
+}
+
+fn landings_json(landings: &[atelier_core::Landing]) -> Vec<Value> {
+    landings
+        .iter()
+        .map(|landing| {
+            json!({
+                "source": source_json(landing.source.as_deref()),
+                "snapshot_id": landing.snapshot,
+            })
+        })
+        .collect()
+}
+
+/// A source over the wire: its mount name, or `null` for the root.
+fn source_json(source: Option<&str>) -> Value {
+    match source {
+        Some(name) => Value::String(name.to_owned()),
+        None => Value::Null,
     }
 }
 

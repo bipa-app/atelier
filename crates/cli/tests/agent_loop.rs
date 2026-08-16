@@ -224,7 +224,10 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
         &json!({"request_id": "r1", "actor_name": "scribe", "actor_kind": "agent"}),
     );
     assert_eq!(outcome["state"], "landed");
-    let landed = outcome["snapshot_id"].as_str().expect("landed snapshot");
+    let landed = outcome["landings"][0]["snapshot_id"]
+        .as_str()
+        .expect("landed snapshot");
+    assert_eq!(outcome["landings"][0]["source"], Value::Null);
 
     // The change is on the shared line, attributed to the agent.
     let log = ws(config_home.path(), workspace.path())
@@ -493,7 +496,7 @@ fn concurrent_applies_share_one_lease_across_processes() {
     let (outcome, is_error) = decode_tool_result(&response);
     assert!(!is_error, "the winner's approve failed: {outcome}");
     assert_eq!(outcome["state"], "landed");
-    let first = outcome["snapshot_id"]
+    let first = outcome["landings"][0]["snapshot_id"]
         .as_str()
         .expect("snapshot")
         .to_owned();

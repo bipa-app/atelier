@@ -67,6 +67,12 @@ fn ensure_schema(conn: &Connection) -> Result<(), Error> {
             change_id TEXT NOT NULL,
             PRIMARY KEY (session_id, source)
         );
+        CREATE TABLE IF NOT EXISTS request_landings (
+            request_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            PRIMARY KEY (request_id, source)
+        );
         CREATE TABLE IF NOT EXISTS lease (
             point TEXT PRIMARY KEY,
             holder TEXT NOT NULL,
@@ -74,7 +80,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), Error> {
         );",
     )
     .map_err(engine_err)?;
-    conn.pragma_update(None, "user_version", 3)
+    conn.pragma_update(None, "user_version", 4)
         .map_err(engine_err)?;
     Ok(())
 }

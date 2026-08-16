@@ -238,7 +238,7 @@ fn approve(request: &str) -> Result<Vec<String>> {
     let id: RequestId = request.parse()?;
     let approver = workspace.actor().clone();
     let outcome = workspace.approve(id, &approver)?;
-    Ok(vec![render_outcome(&outcome)])
+    Ok(render_outcome(&outcome))
 }
 
 fn reject(request: &str, reason: Option<&str>) -> Result<Vec<String>> {
@@ -253,7 +253,7 @@ fn land(session: &str) -> Result<Vec<String>> {
     let mut workspace = open_current()?;
     let id: SessionId = session.parse()?;
     let outcome = workspace.land(id)?;
-    Ok(vec![render_outcome(&outcome)])
+    Ok(render_outcome(&outcome))
 }
 
 /// Blocks until the process is interrupted, printing each act as it
@@ -288,18 +288,44 @@ fn serve(mcp_stdio: bool, http: bool, bind: &str, allow_remote: bool) -> Result<
     Ok(Vec::new())
 }
 
-fn render_outcome(outcome: &GateOutcome) -> String {
+/// The outcome as lines: one `landed …` per source (root lines keep the
+/// exact v1 shape), one `parked …` per parked source.
+fn render_outcome(outcome: &GateOutcome) -> Vec<String> {
     match outcome {
-        GateOutcome::Landed { snapshot } => format!("landed {snapshot}"),
-        GateOutcome::Pending { request, required } => format!(
+        GateOutcome::Landed { landings } => landings.iter().map(render_landing).collect(),
+        GateOutcome::Pending { request, required } => vec![format!(
             "pending: {} of {required} approvals on {}",
             request.approvals.len(),
             request.id
-        ),
-        GateOutcome::Parked { request } => format!(
-            "parked {}: the change conflicts with the shared line; a new snapshot re-opens the gate",
-            request.id
-        ),
+        )],
+        GateOutcome::Parked {
+            request,
+            landings,
+            parked,
+        } => {
+            let mut lines: Vec<String> = landings.iter().map(render_landing).collect();
+            for source in parked {
+                let line = match source {
+                    Some(name) => format!(
+                        "parked {} on {name}: the change conflicts with that shared line; a new snapshot re-opens the gate",
+                        request.id
+                    ),
+                    None => format!(
+                        "parked {}: the change conflicts with the shared line; a new snapshot re-opens the gate",
+                        request.id
+                    ),
+                };
+                lines.push(line);
+            }
+            lines
+        }
+    }
+}
+
+fn render_landing(landing: &atelier_core::Landing) -> String {
+    match &landing.source {
+        Some(source) => format!("landed {source} {}", landing.snapshot),
+        None => format!("landed {}", landing.snapshot),
     }
 }
 

@@ -96,9 +96,12 @@ fn an_agent_session_lands_through_the_gate() {
     assert_eq!(ws.request_land(session.id).unwrap().id, request.id);
 
     let outcome = ws.approve(request.id, &agent()).unwrap();
-    let GateOutcome::Landed { snapshot } = outcome else {
+    let GateOutcome::Landed { landings } = outcome else {
         panic!("self-approval under the default policy must land, got {outcome:?}");
     };
+    assert_eq!(landings.len(), 1);
+    assert_eq!(landings[0].source, None);
+    let snapshot = landings[0].snapshot.clone();
 
     // The shared line advanced to the landed snapshot, attributed to the
     // agent, and the root working copy materialized the change.
@@ -161,10 +164,18 @@ fn landing_into_a_moved_conflicting_line_parks_the_request() {
 
     let request = ws.request_land(session.id).unwrap();
     let outcome = ws.approve(request.id, &agent()).unwrap();
-    let GateOutcome::Parked { request: parked } = outcome else {
+    let GateOutcome::Parked {
+        request: parked,
+        landings,
+        parked: parked_sources,
+    } = outcome
+    else {
         panic!("a conflicting apply must park, got {outcome:?}");
     };
     assert_eq!(parked.state, RequestState::Parked);
+    // The root is the parked line; nothing landed under this request.
+    assert_eq!(landings, Vec::new());
+    assert_eq!(parked_sources, vec![None]);
 
     // The shared line did not move and never carries the conflict.
     assert_eq!(ws.log(1).unwrap()[0].snapshot.id, head_before);
@@ -438,9 +449,10 @@ fn a_stale_apply_cannot_overwrite_a_concurrent_abandonment() {
 
     // The engine landed the approved tip — that is history and journaled —
     // but the store rows keep the abandonment: nothing was overwritten.
-    let GateOutcome::Landed { snapshot } = outcome else {
+    let GateOutcome::Landed { landings } = outcome else {
         panic!("the held apply landed the approved tip, got {outcome:?}");
     };
+    let snapshot = landings[0].snapshot.clone();
     assert_eq!(ws_b.log(2).unwrap()[0].snapshot.id, snapshot);
     assert_eq!(
         ws_b.request(request.id).unwrap().state,
