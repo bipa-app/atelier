@@ -6,7 +6,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atelier_diff_core::{
-    Delta, DeltaKind, Diff, FormatPackage, PackageId, as_text, detect_package, diff_lines,
+    Address, Delta, DeltaKind, Diff, Fidelity, FormatPackage, PackageId, as_text, detect_package,
+    diff_lines,
 };
 use atelier_format_docx::DocxPackage;
 use notify::{Event, RecursiveMode, Watcher};
@@ -803,39 +804,43 @@ impl Workspace {
 
     /// Raise every delta the ladder can: through a package projection when
     /// one detects the document, as plain text when both sides are text,
-    /// else leave it at the binary rung it arrived at.
+    /// else leave it at the binary rung it arrived at. A package differ's
+    /// rich deltas follow the file delta they refine.
     fn raised(&self, diff: Diff, sides: &DiffSides) -> Result<Diff, Error> {
-        let deltas = diff
-            .deltas
-            .into_iter()
-            .map(|delta| self.raise(delta, sides))
-            .collect::<Result<Vec<Delta>, Error>>()?;
+        let mut deltas = Vec::new();
+        for delta in diff.deltas {
+            deltas.extend(self.raise(delta, sides)?);
+        }
         Ok(Diff { deltas })
     }
 
     /// Only `Changed` deltas raise in v1: an added or removed document is
     /// already told by its listing line, without dumping its whole content.
-    fn raise(&self, delta: Delta, sides: &DiffSides) -> Result<Delta, Error> {
+    fn raise(&self, delta: Delta, sides: &DiffSides) -> Result<Vec<Delta>, Error> {
         if delta.kind != DeltaKind::Changed {
-            return Ok(delta);
+            return Ok(vec![delta]);
         }
         let (before, after) = match self.engine.read_file_sides(sides, delta.address.as_str())? {
             (Side::Blob(before), Side::Blob(after)) => (before, after),
             (Side::TooLarge, _) | (_, Side::TooLarge) => {
                 self.file_too_large(delta.address.as_str())?;
-                return Ok(delta);
+                return Ok(vec![delta]);
             }
-            (Side::Absent, _) | (_, Side::Absent) => return Ok(delta),
+            (Side::Absent, _) | (_, Side::Absent) => return Ok(vec![delta]),
         };
         if let Some(package) = self.detected(delta.address.as_str(), &after.bytes)? {
             let projections = (
                 self.projection(package, delta.address.as_str(), &before)?,
                 self.projection(package, delta.address.as_str(), &after)?,
             );
-            if let (Some(before), Some(after)) = projections {
-                return Ok(delta.at_text_rung(diff_lines(&before, &after), Some(package.id())));
-            }
-            return Ok(delta);
+            let (Some(projected_before), Some(projected_after)) = projections else {
+                return Ok(vec![delta]);
+            };
+            let raised = delta.at_text_rung(
+                diff_lines(&projected_before, &projected_after),
+                Some(package.id()),
+            );
+            return self.enriched(raised, package, &before, &after);
         }
         // "Fidelity drops to text or binary" (CONTEXT.md, Format Package):
         // a package-less document that decodes as text diffs as text —
@@ -843,9 +848,57 @@ impl Workspace {
         // allowlists would drop the source and config files agents edit
         // all day to the binary rung. Opaque bytes stay binary.
         match (as_text(&before.bytes), as_text(&after.bytes)) {
-            (Some(before), Some(after)) => Ok(delta.at_text_rung(diff_lines(before, after), None)),
-            _ => Ok(delta),
+            (Some(before), Some(after)) => {
+                Ok(vec![delta.at_text_rung(diff_lines(before, after), None)])
+            }
+            _ => Ok(vec![delta]),
         }
+    }
+
+    /// The Rich rung, additive over the text rung: the package differ's
+    /// deltas — formatting the projection cannot express — follow the file
+    /// delta, their format-terms addresses scoped under its path. Text
+    /// changes stay on the file delta's lines, so nothing the differ does
+    /// not model can ever drop out of a diff. A failing or panicking
+    /// differ journals `package_failed` and the text rung stands.
+    fn enriched(
+        &self,
+        raised: Delta,
+        package: &dyn FormatPackage,
+        before: &FileBlob,
+        after: &FileBlob,
+    ) -> Result<Vec<Delta>, Error> {
+        let rich = match catch_unwind(AssertUnwindSafe(|| {
+            package.diff(&before.bytes, &after.bytes)
+        })) {
+            Ok(None) => return Ok(vec![raised]),
+            Ok(Some(Ok(rich))) => rich,
+            Ok(Some(Err(error))) => {
+                self.differ_failed(raised.address.as_str(), package.id(), &error.to_string())?;
+                return Ok(vec![raised]);
+            }
+            Err(_) => {
+                self.differ_failed(
+                    raised.address.as_str(),
+                    package.id(),
+                    "the package panicked during diffing",
+                )?;
+                return Ok(vec![raised]);
+            }
+        };
+        if rich.is_empty() {
+            return Ok(vec![raised]);
+        }
+        let path = raised.address.as_str().to_owned();
+        let mut deltas = vec![Delta {
+            fidelity: Fidelity::Rich,
+            ..raised
+        }];
+        deltas.extend(rich.into_iter().map(|delta| Delta {
+            address: Address::new(format!("{path} > {}", delta.address.as_str())),
+            ..delta
+        }));
+        Ok(deltas)
     }
 
     /// The package claiming the document, behind a panic boundary: a
@@ -909,6 +962,15 @@ impl Workspace {
             Some(id) => format!("{address} {id} fell_back_to=binary: {reason}"),
             None => format!("{address} fell_back_to=binary: {reason}"),
         };
+        let entry = self.entry(Act::PackageFailed, Some(reference))?;
+        self.journal.append(&entry)
+    }
+
+    /// A differ failure costs only the rich rung: the text rung the
+    /// projection already raised stands, and the journal keeps the
+    /// degradation loud.
+    fn differ_failed(&self, address: &str, package: PackageId, reason: &str) -> Result<(), Error> {
+        let reference = format!("{address} {package} fell_back_to=text: {reason}");
         let entry = self.entry(Act::PackageFailed, Some(reference))?;
         self.journal.append(&entry)
     }

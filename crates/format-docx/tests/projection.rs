@@ -57,7 +57,7 @@ fn body_projects_to_golden_markdown() {
         .unwrap();
 
     assert_eq!(projection.text, EXPECTED);
-    assert_eq!(projection.package.to_string(), "format-docx@0.2.0");
+    assert_eq!(projection.package.to_string(), "format-docx@0.3.0");
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn a_zip_without_the_document_part_is_an_error() {
 
     assert_eq!(
         error.to_string(),
-        "format-docx@0.2.0: word/document.xml is missing"
+        "format-docx@0.3.0: word/document.xml is missing"
     );
 }
 
