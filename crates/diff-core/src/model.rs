@@ -68,7 +68,9 @@ pub struct Line {
 /// the text-rung comparison and is empty at the binary rung. `package`
 /// names the format package whose projection or differ produced the delta —
 /// outputs carry the package version (ADR-0003) — and is `None` at rungs no
-/// package produced: the binary floor and plain-text raises.
+/// package produced: the binary floor and plain-text raises. `summary` is a
+/// rich delta's difference in the format's own terms — the affected text
+/// and the property change — and `None` below the rich rung.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delta {
     pub address: Address,
@@ -78,6 +80,7 @@ pub struct Delta {
     pub after: Option<String>,
     pub lines: Vec<Line>,
     pub package: Option<PackageId>,
+    pub summary: Option<String>,
 }
 
 impl Delta {
@@ -90,6 +93,22 @@ impl Delta {
             lines,
             package,
             ..self
+        }
+    }
+
+    /// A rich-rung delta a format package produced: addressed in the
+    /// format's own terms, its difference described by `summary`.
+    #[must_use]
+    pub fn rich(address: Address, summary: impl Into<String>, package: PackageId) -> Self {
+        Self {
+            address,
+            kind: DeltaKind::Changed,
+            fidelity: Fidelity::Rich,
+            before: None,
+            after: None,
+            lines: Vec::new(),
+            package: Some(package),
+            summary: Some(summary.into()),
         }
     }
 }

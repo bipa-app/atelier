@@ -46,6 +46,7 @@ fn binary_delta(
         after: after.cloned(),
         lines: Vec::new(),
         package: None,
+        summary: None,
     }
 }
 

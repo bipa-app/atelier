@@ -7,14 +7,19 @@ pub fn render_diff(diff: &Diff) -> Vec<String> {
     diff.deltas.iter().flat_map(render_delta).collect()
 }
 
-/// The delta's listing line, then its line comparison when the ladder
-/// raised it to the text rung; a binary-rung delta stays a bare listing.
+/// The delta's listing line; a rich delta's summary — the difference in
+/// the format's own terms — indents under it, and a text-rung line
+/// comparison follows. The two-space indent cannot collide with content
+/// lines (always signed) or the no-newline marker (starts with `\`).
 fn render_delta(delta: &Delta) -> Vec<String> {
     let mut rendered = vec![printable(&format!(
         "{} {}",
         delta_label(delta.kind),
         delta.address.as_str()
     ))];
+    if let Some(summary) = &delta.summary {
+        rendered.push(format!("  {}", printable(summary)));
+    }
     for line in &delta.lines {
         match line.kind {
             LineKind::Removed => rendered.push(format!("-{}", printable(&line.text))),
@@ -80,6 +85,7 @@ mod tests {
             after: Some("id2".to_owned()),
             lines: Vec::new(),
             package: None,
+            summary: None,
         };
 
         assert_eq!(

@@ -81,7 +81,7 @@ const LIST_INDENT: &str = "   ";
 /// carry pre-revision properties and `del`/`moveFrom` wrap content a
 /// pending revision removes — the accepted body excludes both. Text-box
 /// content sits outside the main body flow and is not projected in v1.
-const SKIPPED_SUBTREES: [&[u8]; 10] = [
+pub(crate) const SKIPPED_SUBTREES: [&[u8]; 10] = [
     b"pPrChange",
     b"rPrChange",
     b"tblPrChange",
@@ -120,25 +120,7 @@ pub(crate) enum DocxError {
 /// resolve.
 pub(crate) fn markdown(bytes: &[u8]) -> Result<String, DocxError> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))?;
-    // OPC locates parts through relationships, not fixed paths, and the
-    // relationship graph is authoritative: when a relationships part
-    // exists, only what it names counts. The canonical layout applies
-    // only to packages whose relationship parts are absent — the minimal
-    // producers that omit them always use it.
-    let document_path = match part(&mut archive, PACKAGE_RELS)? {
-        Some(xml) => match relationship_target(&xml, "", &OFFICE_DOCUMENT_TYPES)? {
-            Some(target) => target,
-            None => {
-                return Err(DocxError::Structure(
-                    "the package names no officeDocument relationship".to_owned(),
-                ));
-            }
-        },
-        None => DOCUMENT_PART.to_owned(),
-    };
-    let Some(document) = part(&mut archive, &document_path)? else {
-        return Err(DocxError::MissingDocument);
-    };
+    let (document, document_path) = document_part(&mut archive)?;
     let document_dir = match document_path.rsplit_once('/') {
         Some((dir, _)) => dir.to_owned(),
         None => String::new(),
@@ -181,6 +163,32 @@ pub(crate) fn markdown(bytes: &[u8]) -> Result<String, DocxError> {
         None => NumberingPart::default(),
     };
     walk(&document, &styles, default_style.as_deref(), &numbering)
+}
+
+/// The main document part and its resolved path, located through the
+/// package relationships. OPC locates parts through relationships, not
+/// fixed paths, and the relationship graph is authoritative: when a
+/// relationships part exists, only what it names counts. The canonical
+/// layout applies only to packages whose relationship parts are absent —
+/// the minimal producers that omit them always use it.
+pub(crate) fn document_part(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+) -> Result<(String, String), DocxError> {
+    let document_path = match part(archive, PACKAGE_RELS)? {
+        Some(xml) => match relationship_target(&xml, "", &OFFICE_DOCUMENT_TYPES)? {
+            Some(target) => target,
+            None => {
+                return Err(DocxError::Structure(
+                    "the package names no officeDocument relationship".to_owned(),
+                ));
+            }
+        },
+        None => DOCUMENT_PART.to_owned(),
+    };
+    match part(archive, &document_path)? {
+        Some(document) => Ok((document, document_path)),
+        None => Err(DocxError::MissingDocument),
+    }
 }
 
 /// One auxiliary part by its resolved path. A path named by a
@@ -517,8 +525,25 @@ fn walk(
     default_style: Option<&str>,
     numbering: &NumberingPart,
 ) -> Result<String, DocxError> {
-    let mut reader = NsReader::from_str(xml);
     let mut document = Document::new(styles, default_style, numbering);
+    walk_body(xml, &mut document)?;
+    document.ensure_closed()?;
+    Ok(document.render())
+}
+
+/// What a body walk feeds: `WordprocessingML` element opens and closes
+/// plus character content, already restricted to the accepted body —
+/// masked subtrees (`mc:Choice` branches, text boxes) never reach a sink,
+/// and every well-formedness rule has run.
+pub(crate) trait BodySink {
+    fn open<R>(&mut self, reader: &NsReader<R>, start: &BytesStart<'_>) -> Result<(), DocxError>;
+    fn close(&mut self, local_name: &[u8]) -> Result<(), DocxError>;
+    fn text(&mut self, content: &str) -> Result<(), DocxError>;
+}
+
+/// One pass over `word/document.xml` in document order, feeding `sink`.
+pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), DocxError> {
+    let mut reader = NsReader::from_str(xml);
     let mut frame = PartFrame::new("document", b"document");
     // The depth a masked subtree opened at, while one is open. Two kinds
     // mask: `mc:Choice` branches (this projector supports no extensions,
@@ -542,7 +567,7 @@ fn walk(
                 }
                 resolved_attributes(&reader, &start)?;
                 if wordprocessingml && choice_at.is_none() {
-                    document.open(&reader, &start)?;
+                    sink.open(&reader, &start)?;
                 }
             }
             (resolve, Event::Empty(start)) => {
@@ -550,8 +575,8 @@ fn walk(
                 frame.empty(wordprocessingml, start.local_name().as_ref())?;
                 resolved_attributes(&reader, &start)?;
                 if wordprocessingml && choice_at.is_none() {
-                    document.open(&reader, &start)?;
-                    document.close(start.local_name().as_ref())?;
+                    sink.open(&reader, &start)?;
+                    sink.close(start.local_name().as_ref())?;
                 }
             }
             (resolve, Event::End(end)) => {
@@ -564,7 +589,7 @@ fn walk(
                     continue;
                 }
                 if wordprocessingml {
-                    document.close(end.local_name().as_ref())?;
+                    sink.close(end.local_name().as_ref())?;
                 }
             }
             (_, Event::Text(text)) => {
@@ -572,7 +597,7 @@ fn walk(
                 ensure_xml_chars(&content)?;
                 frame.characters(xml_whitespace_only(&content))?;
                 if choice_at.is_none() {
-                    document.text(&normalized_eol(&content))?;
+                    sink.text(&normalized_eol(&content))?;
                 }
             }
             (_, Event::CData(data)) => {
@@ -582,7 +607,7 @@ fn walk(
                 ensure_xml_chars(content)?;
                 frame.characters(false)?;
                 if choice_at.is_none() {
-                    document.text(&normalized_eol(content))?;
+                    sink.text(&normalized_eol(content))?;
                 }
             }
             (_, Event::GeneralRef(reference)) => {
@@ -590,7 +615,7 @@ fn walk(
                 let content = resolve_reference(&reference)?;
                 ensure_xml_chars(&content)?;
                 if choice_at.is_none() {
-                    document.text(&content)?;
+                    sink.text(&content)?;
                 }
             }
             (_, Event::Decl(_) | Event::DocType(_)) => {
@@ -616,9 +641,7 @@ fn walk(
             }
         }
     }
-
-    document.ensure_closed()?;
-    Ok(document.render())
+    Ok(())
 }
 
 /// Every attribute must be well formed, on every element — not only the
@@ -946,7 +969,9 @@ impl<'a> Document<'a> {
             tables: Vec::new(),
         }
     }
+}
 
+impl BodySink for Document<'_> {
     fn open<R>(&mut self, reader: &NsReader<R>, start: &BytesStart<'_>) -> Result<(), DocxError> {
         if self.skipping > 0 {
             self.skipping += 1;
@@ -1167,7 +1192,9 @@ impl<'a> Document<'a> {
             None => Err(DocxError::Structure("text outside a paragraph".to_owned())),
         }
     }
+}
 
+impl Document<'_> {
     /// Route a finished paragraph: into the open table cell when a table is
     /// open, else into the body as its markdown block.
     ///
@@ -1451,7 +1478,7 @@ fn escaped_inline(text: &str) -> String {
 /// An `ST_OnOff` toggle value: an absent `w:val` turns the property on,
 /// as Word reads it. Anything outside the schema's lexicon is malformed —
 /// guessing would project silently wrong emphasis.
-fn on_off(value: Option<&str>) -> Result<bool, DocxError> {
+pub(crate) fn on_off(value: Option<&str>) -> Result<bool, DocxError> {
     match value {
         None | Some("1" | "true" | "on") => Ok(true),
         Some("0" | "false" | "off") => Ok(false),
@@ -1526,7 +1553,7 @@ fn list_start(value: &str) -> Result<u32, DocxError> {
 
 /// The character a `w:sym` names (an `ST_ShortHexNumber`). The symbol's
 /// font is not carried: two symbols differing only by font project alike.
-fn sym_char(value: &str) -> Result<char, DocxError> {
+pub(crate) fn sym_char(value: &str) -> Result<char, DocxError> {
     let code = u32::from_str_radix(value, 16)
         .map_err(|_| DocxError::Structure(format!("sym char {value:?} is not hex")))?;
     char::from_u32(code)
@@ -2232,7 +2259,7 @@ fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, DocxError> {
 /// attributes in no namespace or the `WordprocessingML` one. Every
 /// attribute's prefix must resolve — an undeclared prefix is malformed
 /// XML, and accepting it would project silently wrong markdown.
-fn attribute<R>(
+pub(crate) fn attribute<R>(
     reader: &NsReader<R>,
     start: &BytesStart<'_>,
     name: &[u8],

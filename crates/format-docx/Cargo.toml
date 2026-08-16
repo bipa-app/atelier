@@ -1,6 +1,6 @@
 [package]
 name = "atelier-format-docx"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 atelier-diff-core = { path = "../diff-core" }
+similar.workspace = true
 quick-xml.workspace = true
 thiserror.workspace = true
 zip.workspace = true
