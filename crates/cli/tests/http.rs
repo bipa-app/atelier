@@ -566,3 +566,48 @@ fn the_error_surface_answers_by_the_book() {
 
     server.kill();
 }
+
+#[test]
+fn rest_sessions_take_mount_scoped_paths_unchanged_in_shape() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+    let app = TempDir::new().expect("create app source");
+    fs::write(app.path().join("main.rs"), "fn main() {}\n").expect("write app file");
+    ws(config_home.path(), workspace.path())
+        .args(["attach", app.path().to_str().expect("utf-8 path")])
+        .args(["--mount", "app"])
+        .assert()
+        .success();
+
+    let server = HttpServer::spawn(config_home.path(), workspace.path());
+    let session = server.json(
+        "POST",
+        "/v1/sessions",
+        &serde_json::json!({
+            "actor_name": "span-agent", "actor_kind": "agent",
+            "instruction_summary": "edit a mounted project over rest",
+        }),
+    );
+    assert_eq!(session["session_id"], "s1");
+
+    let (status, written) = server.request(
+        "PUT",
+        "/v1/sessions/s1/files/app/main.rs",
+        "fn main() { run() }\n",
+    );
+    assert_eq!(status, 200);
+    let written: Value = serde_json::from_str(&written).expect("write response is json");
+    assert!(
+        written["snapshot_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 40)
+    );
+
+    let diff = server.json("GET", "/v1/sessions/s1/diff", &Value::Null);
+    assert_eq!(
+        diff["diff"],
+        "M app/main.rs\n-fn main() {}\n+fn main() { run() }"
+    );
+    server.kill();
+}
