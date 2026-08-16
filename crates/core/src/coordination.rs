@@ -101,14 +101,23 @@ impl Coordination {
         Ok(())
     }
 
-    pub fn set_session_state(&self, id: i64, state: SessionState) -> Result<(), Error> {
-        self.conn
+    /// Move the session's state when it still holds `from`; whether the
+    /// row moved. A stale writer — racing another process past the same
+    /// check — loses here instead of overwriting.
+    pub fn move_session_state(
+        &self,
+        id: i64,
+        from: SessionState,
+        to: SessionState,
+    ) -> Result<bool, Error> {
+        let moved = self
+            .conn
             .execute(
-                "UPDATE sessions SET state = ?2 WHERE id = ?1",
-                params![id, state],
+                "UPDATE sessions SET state = ?3 WHERE id = ?1 AND state = ?2",
+                params![id, from, to],
             )
             .map_err(engine_err)?;
-        Ok(())
+        Ok(moved == 1)
     }
 
     pub fn session(&self, id: i64) -> Result<Option<SessionRow>, Error> {
@@ -202,14 +211,27 @@ impl Coordination {
             .map_err(engine_err)
     }
 
-    pub fn set_request_state(&self, id: i64, state: RequestState) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "UPDATE landing_requests SET state = ?2 WHERE id = ?1",
-                params![id, state],
-            )
-            .map_err(engine_err)?;
-        Ok(())
+    /// Move the request's state when it still holds one of `from`;
+    /// whether the row moved. The predicate names the expected prior
+    /// states, so a write racing another process fails instead of
+    /// overwriting the winner's transition.
+    pub fn move_request_state(
+        &self,
+        id: i64,
+        from: &[RequestState],
+        to: RequestState,
+    ) -> Result<bool, Error> {
+        let placeholders: Vec<String> = (0..from.len()).map(|i| format!("?{}", i + 3)).collect();
+        let sql = format!(
+            "UPDATE landing_requests SET state = ?2 WHERE id = ?1 AND state IN ({})",
+            placeholders.join(", ")
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&id, &to];
+        for state in from {
+            values.push(state);
+        }
+        let moved = self.conn.execute(&sql, &values[..]).map_err(engine_err)?;
+        Ok(moved == 1)
     }
 
     pub fn add_approval(
@@ -348,4 +370,107 @@ fn collect<T>(rows: impl Iterator<Item = Result<T, rusqlite::Error>>) -> Result<
         out.push(row.map_err(engine_err)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coordination() -> (tempfile::TempDir, Coordination) {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination = Coordination::open(&dir.path().join("journal.sqlite3")).unwrap();
+        (dir, coordination)
+    }
+
+    fn actor() -> Actor {
+        Actor {
+            name: "test-actor".to_owned(),
+            kind: ActorKind::Human,
+        }
+    }
+
+    #[test]
+    fn a_request_move_names_its_prior_state_or_loses() {
+        let (_dir, coordination) = coordination();
+        let session = coordination
+            .create_session(&actor(), "summary", None, None, 1)
+            .unwrap();
+        let request = coordination.create_request(session, &actor(), 2).unwrap();
+
+        // A move from a state the row does not hold changes nothing.
+        let stale = coordination
+            .move_request_state(request, &[RequestState::Approved], RequestState::Landed)
+            .unwrap();
+        assert!(!stale);
+        assert_eq!(
+            coordination.request(request).unwrap().unwrap().state,
+            RequestState::Open
+        );
+
+        // The legal transition lands; repeating it is stale and loses.
+        assert!(
+            coordination
+                .move_request_state(request, &[RequestState::Open], RequestState::Approved)
+                .unwrap()
+        );
+        assert!(
+            !coordination
+                .move_request_state(request, &[RequestState::Open], RequestState::Approved)
+                .unwrap()
+        );
+        assert_eq!(
+            coordination.request(request).unwrap().unwrap().state,
+            RequestState::Approved
+        );
+    }
+
+    #[test]
+    fn a_request_move_accepts_any_of_its_named_priors() {
+        let (_dir, coordination) = coordination();
+        let session = coordination
+            .create_session(&actor(), "summary", None, None, 1)
+            .unwrap();
+        let request = coordination.create_request(session, &actor(), 2).unwrap();
+
+        // Open is the last entry in the from list: every placeholder binds.
+        let moved = coordination
+            .move_request_state(
+                request,
+                &[
+                    RequestState::Approved,
+                    RequestState::Parked,
+                    RequestState::Open,
+                ],
+                RequestState::Abandoned,
+            )
+            .unwrap();
+        assert!(moved);
+        assert_eq!(
+            coordination.request(request).unwrap().unwrap().state,
+            RequestState::Abandoned
+        );
+    }
+
+    #[test]
+    fn a_session_move_names_its_prior_state_or_loses() {
+        let (_dir, coordination) = coordination();
+        let session = coordination
+            .create_session(&actor(), "summary", None, None, 1)
+            .unwrap();
+
+        assert!(
+            coordination
+                .move_session_state(session, SessionState::Open, SessionState::Landed)
+                .unwrap()
+        );
+        // The stale writer — abandoning a session already landed — loses.
+        let stale = coordination
+            .move_session_state(session, SessionState::Open, SessionState::Abandoned)
+            .unwrap();
+        assert!(!stale);
+        assert_eq!(
+            coordination.session(session).unwrap().unwrap().state,
+            SessionState::Landed
+        );
+    }
 }

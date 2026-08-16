@@ -315,3 +315,146 @@ fn session_paths_never_leave_the_working_copy() {
     let absolute = ws.session_read(session.id, "/etc/hosts", 0, None);
     assert!(matches!(absolute, Err(Error::PathOutsideWorkingCopy(_))));
 }
+
+#[test]
+fn every_closed_gate_refuses_each_transition_by_name() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    fs::write(root.path().join("notes.txt"), "shared\n").unwrap();
+
+    // Landed: approve, reject, and a fresh approval all refuse by name.
+    let session = ws.open_session(&agent(), &instruction()).unwrap();
+    ws.session_write(session.id, "notes.txt", "landed work\n")
+        .unwrap();
+    let request = ws.request_land(session.id).unwrap();
+    let outcome = ws.approve(request.id, &agent()).unwrap();
+    assert!(matches!(outcome, GateOutcome::Landed { .. }));
+    for refused in [
+        ws.approve(request.id, &human()).map(|_| ()).err(),
+        ws.reject(request.id, &human(), None).map(|_| ()).err(),
+    ] {
+        let error = refused.expect("a landed gate is closed");
+        assert!(
+            matches!(&error, Error::RequestClosed { state, .. } if state == "landed"),
+            "unexpected refusal: {error:?}"
+        );
+    }
+    let error = ws
+        .abandon(session.id)
+        .expect_err("a landed session is closed");
+    assert!(matches!(&error, Error::SessionClosed { state, .. } if state == "landed"));
+
+    // Rejected: the gate stays closed to approval and re-rejection.
+    let session = ws.open_session(&agent(), &instruction()).unwrap();
+    ws.session_write(session.id, "notes.txt", "rejected work\n")
+        .unwrap();
+    let request = ws.request_land(session.id).unwrap();
+    ws.reject(request.id, &human(), Some("not yet")).unwrap();
+    for refused in [
+        ws.approve(request.id, &human()).map(|_| ()).err(),
+        ws.reject(request.id, &human(), None).map(|_| ()).err(),
+    ] {
+        let error = refused.expect("a rejected gate is closed");
+        assert!(
+            matches!(&error, Error::RequestClosed { state, .. } if state == "rejected"),
+            "unexpected refusal: {error:?}"
+        );
+    }
+
+    // Abandoned: same story, session and request both closed.
+    let request = ws.request_land(session.id).unwrap();
+    ws.abandon(session.id).unwrap();
+    let error = ws
+        .approve(request.id, &human())
+        .expect_err("an abandoned gate is closed");
+    assert!(matches!(&error, Error::RequestClosed { state, .. } if state == "abandoned"));
+    let error = ws
+        .abandon(session.id)
+        .expect_err("an abandoned session is closed");
+    assert!(matches!(&error, Error::SessionClosed { state, .. } if state == "abandoned"));
+}
+
+#[expect(
+    unsafe_code,
+    reason = "set_var arms the land-hold test seam in a locked test"
+)]
+fn hold_applies(ms: &str) {
+    // SAFETY: as in set_actor; guarded by `env_lock()`.
+    unsafe {
+        std::env::set_var("ATELIER_LAND_HOLD_MS", ms);
+    }
+}
+
+#[expect(
+    unsafe_code,
+    reason = "remove_var disarms the land-hold test seam in a locked test"
+)]
+fn release_hold() {
+    // SAFETY: as in set_actor; guarded by `env_lock()`.
+    unsafe {
+        std::env::remove_var("ATELIER_LAND_HOLD_MS");
+    }
+}
+
+#[test]
+fn a_stale_apply_cannot_overwrite_a_concurrent_abandonment() {
+    // The apply holds the landing lease and sleeps (the test seam);
+    // another handle abandons the session meanwhile. The engine landing
+    // is history and journals, but the apply's request and session
+    // transitions arrive stale — the abandonment must stand.
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    fs::write(root.path().join("notes.txt"), "shared\n").unwrap();
+
+    let session = ws.open_session(&agent(), &instruction()).unwrap();
+    ws.session_write(session.id, "notes.txt", "agent draft\n")
+        .unwrap();
+    let request = ws.request_land(session.id).unwrap();
+
+    hold_applies("1500");
+    let mut applier = Workspace::open(root.path()).unwrap();
+    let apply = std::thread::spawn(move || applier.approve(request.id, &agent()));
+
+    // Wait for the applier to pass the gate and enter its held apply.
+    let mut ws_b = Workspace::open(root.path()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while ws_b.request(request.id).unwrap().state != RequestState::Approved {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the applier never approved"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    ws_b.abandon(session.id).unwrap();
+
+    let outcome = apply.join().expect("the applier thread joins").unwrap();
+    release_hold();
+
+    // The engine landed the approved tip — that is history and journaled —
+    // but the store rows keep the abandonment: nothing was overwritten.
+    let GateOutcome::Landed { snapshot } = outcome else {
+        panic!("the held apply landed the approved tip, got {outcome:?}");
+    };
+    assert_eq!(ws_b.log(2).unwrap()[0].id, snapshot);
+    assert_eq!(
+        ws_b.request(request.id).unwrap().state,
+        RequestState::Abandoned
+    );
+    assert_eq!(
+        ws_b.session(session.id).unwrap().state,
+        SessionState::Abandoned
+    );
+    let entries = ws_b.journal(50).unwrap();
+    for act in [Act::Land, Act::SessionAbandon] {
+        assert!(
+            entries.iter().any(|entry| entry.act == act),
+            "{act} must be journaled"
+        );
+    }
+}
