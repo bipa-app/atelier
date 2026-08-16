@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use atelier_core::{
-    GateOutcome, JournalEntry, RequestId, SessionId, WatchEvent, WatchStop, Workspace, printable,
-    render_diff,
+    GateOutcome, JournalEntry, RequestId, SessionId, SyncOutcome, WatchEvent, WatchStop, Workspace,
+    printable, render_diff,
 };
 use clap::{Parser, Subcommand};
 
@@ -57,6 +57,15 @@ enum Command {
     /// Land the session's change: request plus self-approval where
     /// policy allows; otherwise the request stays pending for approvers.
     Land { session: String },
+    /// Mirror a folder source's shared line back to its origin; parks when
+    /// the origin changed out-of-band (ADR-0010).
+    Sync {
+        /// The mounted source to sync; the root import when omitted.
+        source: Option<String>,
+        /// Overwrite an origin that changed out-of-band.
+        #[arg(long)]
+        force: bool,
+    },
     /// Watch the workspace: external edits become attributed snapshots.
     Watch {
         /// Quiet time after an edit storm before its snapshot, in milliseconds.
@@ -107,6 +116,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
         Command::Land { session } => land(&session),
+        Command::Sync { source, force } => sync(source.as_deref(), force),
         Command::Watch { debounce_ms } => watch(debounce_ms),
         Command::Run {
             summary,
@@ -282,6 +292,21 @@ fn land(session: &str) -> Result<Vec<String>> {
     let id: SessionId = session.parse()?;
     let outcome = workspace.land(id)?;
     Ok(render_outcome(&outcome))
+}
+
+fn sync(source: Option<&str>, force: bool) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let outcome = workspace.sync(source, force)?;
+    Ok(vec![match outcome {
+        SyncOutcome::Synced { snapshot } => match source {
+            Some(name) => format!("synced {name} {snapshot}"),
+            None => format!("synced {snapshot}"),
+        },
+        SyncOutcome::Parked { .. } => {
+            "parked: the origin changed since the last sync; re-run with --force to overwrite"
+                .to_owned()
+        }
+    }])
 }
 
 fn run_in_session(

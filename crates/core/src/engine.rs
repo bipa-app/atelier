@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use atelier_diff_core::{Diff, diff_listings};
 use futures::{AsyncReadExt, StreamExt};
@@ -22,11 +22,13 @@ use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::Workspace as JjWorkspace;
 use pollster::block_on;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::Actor;
 use crate::error::{Error, config_err, engine_err};
+use crate::workspace::SKIP_NAMES;
 
 const MAX_NEW_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
@@ -627,6 +629,71 @@ impl Engine {
         Ok(self.commit_at(id)?.tree())
     }
 
+    /// Materialize snapshot `id`'s tree at `dest` as a mirror: files are
+    /// written (executable bits kept, symlinks recreated), and anything
+    /// under `dest` the tree lacks is removed — except the engine-internal
+    /// names, which are never touched (ADR-0010).
+    pub fn export_tree(&self, id: &str, dest: &Path) -> Result<(), Error> {
+        block_on(self.export_tree_async(id, dest))
+    }
+
+    async fn export_tree_async(&self, id: &str, dest: &Path) -> Result<(), Error> {
+        let empty = self.empty_tree()?;
+        let tree = self.tree_at(id)?;
+        let mut kept: BTreeSet<String> = BTreeSet::new();
+        let mut stream = empty.diff_stream(&tree, &EverythingMatcher);
+        while let Some(entry) = stream.next().await {
+            let values = entry.values.map_err(engine_err)?;
+            let rel = entry.path.as_internal_file_string().to_owned();
+            let Some(value) = values.after.as_resolved() else {
+                return Err(Error::Engine(format!("conflicted tree entry at {rel}")));
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            let target = dest.join(&rel);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match value {
+                TreeValue::File { id, executable, .. } => {
+                    let mut reader = self
+                        .repo
+                        .store()
+                        .read_file(&entry.path, id)
+                        .await
+                        .map_err(engine_err)?;
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes).await.map_err(engine_err)?;
+                    fs::write(&target, &bytes)?;
+                    if *executable {
+                        let mut permissions = fs::metadata(&target)?.permissions();
+                        permissions.set_mode(0o755);
+                        fs::set_permissions(&target, permissions)?;
+                    }
+                }
+                TreeValue::Symlink(id) => {
+                    let link = self
+                        .repo
+                        .store()
+                        .read_symlink(&entry.path, id)
+                        .await
+                        .map_err(engine_err)?;
+                    if target.symlink_metadata().is_ok() {
+                        fs::remove_file(&target)?;
+                    }
+                    std::os::unix::fs::symlink(&link, &target)?;
+                }
+                other => {
+                    return Err(Error::Engine(format!("cannot export {rel}: {other:?}")));
+                }
+            }
+            kept.insert(rel);
+        }
+        drop(stream);
+        remove_unkept(dest, dest, &kept)
+    }
+
     fn empty_tree(&self) -> Result<MergedTree, Error> {
         let root = self.repo.store().root_commit_id().clone();
         let commit = self.repo.store().get_commit(&root).map_err(engine_err)?;
@@ -683,4 +750,42 @@ fn base_ignores(boundary: &[String]) -> Result<Arc<GitIgnoreFile>, Error> {
     GitIgnoreFile::empty()
         .chain(RepoPath::root(), Path::new(".gitignore"), rules.as_bytes())
         .map_err(engine_err)
+}
+
+/// Remove everything under `dir` the exported tree lacks, skipping the
+/// engine-internal names at any depth; empty directories vanish with
+/// their contents. `root` anchors the tree-relative paths in `kept`.
+fn remove_unkept(root: &Path, dir: &Path, kept: &BTreeSet<String>) -> Result<(), Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(Error::Engine(format!(
+                "cannot mirror over a non-utf8 name at {}",
+                entry.path().display()
+            )));
+        };
+        if SKIP_NAMES.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            remove_unkept(root, &path, kept)?;
+            if fs::read_dir(&path)?.next().is_none() {
+                fs::remove_dir(&path)?;
+            }
+        } else {
+            let rel = path
+                .strip_prefix(root)
+                .map_err(engine_err)?
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if !kept.contains(&rel) {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+    Ok(())
 }

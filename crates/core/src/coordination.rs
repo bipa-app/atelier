@@ -267,6 +267,39 @@ impl Coordination {
         Ok(moved == 1)
     }
 
+    /// The origin fingerprint a source last synced at, if it ever has.
+    pub fn sync_state(&self, mount: &str) -> Result<Option<String>, Error> {
+        self.conn
+            .query_row(
+                "SELECT fingerprint FROM sync_state WHERE mount = ?1",
+                params![mount],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(engine_err)
+    }
+
+    /// Record a completed sync: the origin now mirrors `snapshot_id`, and
+    /// its content hashes to `fingerprint`.
+    pub fn record_sync_state(
+        &self,
+        mount: &str,
+        fingerprint: &str,
+        snapshot_id: &str,
+    ) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT INTO sync_state (mount, fingerprint, snapshot_id)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mount) DO UPDATE
+                 SET fingerprint = excluded.fingerprint,
+                     snapshot_id = excluded.snapshot_id",
+                params![mount, fingerprint, snapshot_id],
+            )
+            .map_err(engine_err)?;
+        Ok(())
+    }
+
     /// Record one source's landing under the request — the fact a re-apply
     /// after a park must not repeat. The root records as `/`.
     pub fn record_landing(
