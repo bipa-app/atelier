@@ -19,7 +19,7 @@ fn word_document(body_sentence: &str) -> String {
     )
 }
 
-const EXPECTED: &str = "# Quarterly report\n\n\n\nThe quick brown fox jumps over the lazy dog & friends.\n\n- First point\n\n  - Nested point\n\n| Region | Total |\n| --- | --- |\n| North | 120 |\n";
+const EXPECTED: &str = "# Quarterly report\n\n\n\n**The quick brown fox** jumps over the lazy dog & friends.\n\n- First point\n\n  - Nested point\n\n| Region | Total |\n| --- | --- |\n| North | 120 |\n";
 
 /// The numbering the fixture's `numId="1"` references: bullets at the
 /// levels the body uses.
@@ -57,7 +57,7 @@ fn body_projects_to_golden_markdown() {
         .unwrap();
 
     assert_eq!(projection.text, EXPECTED);
-    assert_eq!(projection.package.to_string(), "format-docx@0.1.0");
+    assert_eq!(projection.package.to_string(), "format-docx@0.2.0");
 }
 
 #[test]
@@ -85,12 +85,12 @@ fn an_edited_sentence_shows_at_the_text_rung() {
     assert_eq!(lines[0].kind, LineKind::Removed);
     assert_eq!(
         lines[0].text,
-        "The quick brown fox jumps over the lazy dog & friends."
+        "**The quick brown fox** jumps over the lazy dog & friends."
     );
     assert_eq!(lines[1].kind, LineKind::Added);
     assert_eq!(
         lines[1].text,
-        "The quick brown fox leaps over the lazy dog & friends."
+        "**The quick brown fox** leaps over the lazy dog & friends."
     );
 }
 
@@ -117,7 +117,7 @@ fn a_zip_without_the_document_part_is_an_error() {
 
     assert_eq!(
         error.to_string(),
-        "format-docx@0.1.0: word/document.xml is missing"
+        "format-docx@0.2.0: word/document.xml is missing"
     );
 }
 
@@ -928,7 +928,7 @@ fn fence_markers_in_plain_text_are_escaped() {
 
     let projection = DocxPackage.project(&docx(body)).unwrap();
 
-    assert_eq!(projection.text, "\\```rust\n\n\\~~~\n");
+    assert_eq!(projection.text, "\\```rust\n\n\\~\\~\\~\n");
 }
 
 #[test]
@@ -1403,4 +1403,171 @@ fn numbering_definitions_decide_ordered_against_bullet_lists() {
         projection.text,
         "1. first ordered\n\n   - nested bullet\n\nundefined numbering\n"
     );
+}
+
+#[test]
+fn bold_italic_and_strike_runs_project_markdown_emphasis() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r></w:p><w:p><w:r><w:rPr><w:i/></w:rPr><w:t>italic</w:t></w:r></w:p><w:p><w:r><w:rPr><w:strike/></w:rPr><w:t>struck</w:t></w:r></w:p><w:p><w:r><w:rPr><w:strike/><w:b/><w:i/></w:rPr><w:t>all three</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(
+        projection.text,
+        "**bold**\n\n*italic*\n\n~~struck~~\n\n~~***all three***~~\n"
+    );
+}
+
+#[test]
+fn a_bold_only_edit_shows_at_the_text_rung() {
+    let plain = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a critical clause</w:t></w:r></w:p></w:body></w:document>"#;
+    let bolded = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>a critical clause</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let before = DocxPackage.project(&docx(plain)).unwrap();
+    let after = DocxPackage.project(&docx(bolded)).unwrap();
+
+    let lines = diff_lines(&before.text, &after.text);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].kind, LineKind::Removed);
+    assert_eq!(lines[0].text, "a critical clause");
+    assert_eq!(lines[1].kind, LineKind::Added);
+    assert_eq!(lines[1].text, "**a critical clause**");
+}
+
+#[test]
+fn literal_markers_and_real_emphasis_project_differently() {
+    // The injectivity pin: a document that literally says **x** and one
+    // whose x is actually bold must never print the same projection.
+    let literal = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>**x**</w:t></w:r></w:p></w:body></w:document>"#;
+    let bolded = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let first = DocxPackage.project(&docx(literal)).unwrap();
+    let second = DocxPackage.project(&docx(bolded)).unwrap();
+
+    assert_eq!(first.text, "\\*\\*x\\*\\*\n");
+    assert_eq!(second.text, "**x**\n");
+    assert_ne!(first.text, second.text);
+}
+
+#[test]
+fn literal_tildes_and_real_strikethrough_project_differently() {
+    let literal = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>~~x~~</w:t></w:r></w:p></w:body></w:document>"#;
+    let struck = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:strike/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let first = DocxPackage.project(&docx(literal)).unwrap();
+    let second = DocxPackage.project(&docx(struck)).unwrap();
+
+    assert_eq!(first.text, "\\~\\~x\\~\\~\n");
+    assert_eq!(second.text, "~~x~~\n");
+    assert_ne!(first.text, second.text);
+}
+
+#[test]
+fn literal_underscores_escape_inline() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>snake_case_name and _emphasis_</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "snake\\_case\\_name and \\_emphasis\\_\n");
+}
+
+#[test]
+fn split_runs_with_equal_emphasis_project_as_one_span() {
+    // Word splits visually identical text into arbitrary runs (proofing
+    // state does); the projection must not depend on where the splits
+    // fell, or equal documents would diff.
+    let split = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>bo</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ld</w:t></w:r></w:p></w:body></w:document>"#;
+    let whole = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let first = DocxPackage.project(&docx(split)).unwrap();
+    let second = DocxPackage.project(&docx(whole)).unwrap();
+
+    assert_eq!(first.text, "**bold**\n");
+    assert_eq!(first.text, second.text);
+}
+
+#[test]
+fn emphasis_changes_mid_paragraph_close_the_span() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">plain </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r><w:r><w:t xml:space="preserve"> then </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>italic</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "plain **bold** then *italic*\n");
+}
+
+#[test]
+fn emphasis_edge_whitespace_renders_outside_the_markers() {
+    // Markdown emphasis cannot flank whitespace; the bold run's trailing
+    // space renders after the closing marker.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">bold </w:t></w:r><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "**bold** plain\n");
+}
+
+#[test]
+fn emphasis_on_whitespace_alone_projects_plain_whitespace() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "a b\n");
+}
+
+#[test]
+fn an_off_toggle_disables_inherited_emphasis() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>off zero</w:t></w:r><w:r><w:rPr><w:b w:val="false"/></w:rPr><w:t xml:space="preserve"> off false</w:t></w:r><w:r><w:rPr><w:b w:val="true"/></w:rPr><w:t xml:space="preserve"> on</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "off zero off false **on**\n");
+}
+
+#[test]
+fn an_on_off_value_outside_the_schema_is_an_error() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b w:val="maybe"/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let error = DocxPackage.project(&docx(body)).unwrap_err();
+
+    assert!(
+        error.to_string().contains("outside ST_OnOff"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn paragraph_mark_formatting_never_emphasizes_text() {
+    // w:pPr/w:rPr formats the paragraph mark, not any run: its bold must
+    // not leak into the paragraph's text.
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>plain text</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "plain text\n");
+}
+
+#[test]
+fn emphasis_markers_never_cross_a_hard_break() {
+    let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>first</w:t><w:br/><w:t>second</w:t></w:r></w:p></w:body></w:document>"#;
+
+    let projection = DocxPackage.project(&docx(body)).unwrap();
+
+    assert_eq!(projection.text, "**first**\n**second**\n");
 }
