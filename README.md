@@ -11,6 +11,46 @@ atelier answers "what is a workspace in the age of agents": a named, versioned b
 
 Status: pre-alpha, under active design.
 
-Start with [`CONTEXT.md`](CONTEXT.md) (the domain glossary), [`docs/adr/`](docs/adr/) (decisions), and [`plans/`](plans/) (PRD and current plan).
+## Quickstart
+
+Build the `ws` binary (the toolchain is pinned in `rust-toolchain.toml`):
+
+```sh
+git clone https://github.com/bipa-app/atelier
+cargo install --path atelier/crates/cli
+```
+
+Tell atelier who you are, then work in a fresh directory. Every `ws` command snapshots outstanding edits first — there is no save step:
+
+```sh
+mkdir -p ~/.config/atelier
+cat > ~/.config/atelier/config.toml <<'EOF'
+[actor]
+name = "you"
+kind = "human"
+EOF
+
+mkdir demo && cd demo
+ws init
+echo "atelier keeps every edit" > notes.txt
+ws journal
+echo "no save button, no lost work" >> notes.txt
+ws diff
+```
+
+The journal names who did what and when; the diff reads at the highest fidelity the format allows — a changed .docx prints a markdown line diff, never "binary files differ".
+
+From there:
+
+- `ws watch` — external edits (Finder, any editor) become attributed snapshots within seconds.
+- `ws attach <folder>` — bind an existing folder as the workspace's source.
+- `ws serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
+- `ws sessions` / `ws requests` / `ws approve <id>` — review and land an agent's change.
+
+## Contributing
+
+CI runs the same gates you run locally: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — including how to ship support for a new document format as its own package.
+
+Read next: [`CONTEXT.md`](CONTEXT.md) (the domain glossary), [`docs/adr/`](docs/adr/) (decisions), and [`plans/`](plans/) (PRD and current plan).
 
 License: Apache-2.0
