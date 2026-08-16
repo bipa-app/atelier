@@ -32,7 +32,7 @@ Manifest      // rendered self-description: identity, profile, sources, boundary
 // Lifecycle
 Workspace::init(path, opts) -> Workspace
 Workspace::open(path) -> Workspace
-ws.attach(SourceSpec) -> Source            // v1: one LocalFolder source; API shaped for many (mounts)
+ws.attach(SourceSpec) -> Source            // many mounted sources, each its own history (ADR-0009)
 ws.detach(source_id)
 ws.status() -> Status                      // head, dirty paths, open sessions/requests, sources
 ws.manifest() -> Manifest                  // the read model an actor consumes first
