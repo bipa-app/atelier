@@ -194,6 +194,111 @@ fn docx(sentence: &str) -> Vec<u8> {
         .into_inner()
 }
 
+/// A one-paragraph Word document whose run carries `rpr` (a `w:rPr` body).
+fn formatted_docx(rpr: &str, sentence: &str) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>{sentence}</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(document.as_bytes())
+        .expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
+}
+
+#[test]
+fn formatting_only_docx_edit_raises_to_the_rich_rung() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="22"/>"#, "a critical clause"),
+    )
+    .unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(
+        root.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="28"/>"#, "a critical clause"),
+    )
+    .unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 2);
+    assert_eq!(diff.deltas[0].address.as_str(), "report.docx");
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Rich);
+    // A size change is invisible in the projection: no text-rung lines.
+    assert!(diff.deltas[0].lines.is_empty());
+    assert_eq!(diff.deltas[1].address.as_str(), "report.docx > paragraph 1");
+    assert_eq!(diff.deltas[1].fidelity, Fidelity::Rich);
+    assert_eq!(
+        diff.deltas[1].summary.as_deref(),
+        Some("\"a critical clause\" font size 11 → 14")
+    );
+    assert_eq!(
+        diff.deltas[1].package.map(|package| package.to_string()),
+        Some("format-docx@0.3.0".to_owned())
+    );
+}
+
+#[test]
+fn a_failing_differ_keeps_the_text_rung_and_journals_the_degradation() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="22"/>"#, "the sentence stays"),
+    )
+    .unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    // The projector never reads w:sz, so both sides still project and the
+    // text rung sees no line change; only the differ — describing the
+    // size change on this unchanged sentence — refuses the malformed
+    // value.
+    fs::write(
+        root.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="banana"/>"#, "the sentence stays"),
+    )
+    .unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 1);
+    assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
+    // Equal text on both sides: the text rung stands, with no lines.
+    assert!(diff.deltas[0].lines.is_empty());
+
+    let entries = ws.journal(50).unwrap();
+    let failed = entries
+        .iter()
+        .find(|entry| entry.act == Act::PackageFailed)
+        .expect("the degradation must be journaled");
+    let reference = failed.reference.as_deref().expect("reference names it");
+    assert!(reference.contains("report.docx"), "got: {reference}");
+    assert!(reference.contains("fell_back_to=text"), "got: {reference}");
+    assert!(reference.contains("not half-points"), "got: {reference}");
+}
+
 #[test]
 fn changed_docx_raises_to_text_rung_carrying_its_package_and_reuses_the_cache() {
     let _guard = env_lock();
@@ -214,7 +319,7 @@ fn changed_docx_raises_to_text_rung_carrying_its_package_and_reuses_the_cache() 
     assert_eq!(diff.deltas[0].fidelity, Fidelity::Text);
     assert_eq!(
         diff.deltas[0].package.map(|package| package.to_string()),
-        Some("format-docx@0.2.0".to_owned())
+        Some("format-docx@0.3.0".to_owned())
     );
 
     // The second diff of the same snapshots serves both sides from the
@@ -383,7 +488,7 @@ fn failing_package_falls_back_to_binary_and_journals_the_failure() {
         .expect("the fallback must be journaled");
     let reference = failure.reference.as_deref().expect("reference names it");
     assert!(reference.contains("broken.docx"), "got: {reference}");
-    assert!(reference.contains("format-docx@0.2.0"), "got: {reference}");
+    assert!(reference.contains("format-docx@0.3.0"), "got: {reference}");
     assert!(
         reference.contains("fell_back_to=binary"),
         "got: {reference}"
