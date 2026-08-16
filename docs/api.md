@@ -121,22 +121,30 @@ one dispatch behind it.
 POST /mcp                             MCP streamable HTTP: one JSON-RPC message per POST,
                                       answered as JSON; notifications → 202; GET → 405
                                       (no server-initiated streams in v1)
+GET  /v1/manifest                     text/plain — the exact render `atelier manifest` prints
+GET  /v1/status                       text/plain — the exact render `atelier status` prints
 GET  /v1/diff                         the workspace diff, text/plain — the exact lines `atelier diff` prints
+GET  /v1/journal?limit=
+GET  /v1/requests                     every landing request, newest first
 POST /v1/sessions                     open (actor, instruction)
+GET  /v1/sessions/{s}/files/{path}?start=&max_bytes=   windowed read (projections included)
 PUT  /v1/sessions/{s}/files/{path}    write; body is the content
 GET  /v1/sessions/{s}/diff
+POST /v1/sessions/{s}/request-land
 POST /v1/sessions/{s}/land
-GET  /v1/journal?limit=
+POST /v1/sessions/{s}/abandon
+POST /v1/requests/{id}/approve        body may name the actor (actor_name, actor_kind)
+POST /v1/requests/{id}/reject        body may carry a reason
 ```
 
-Statuses: 400 broken protocol · 422 domain refusal (`{"error": …}`) · 404/405 routing.
-The `manifest` tool is shipped on both MCP transports — the first thing an actor
-reads: identity, sources, discipline, live state, and the loop. `atelier manifest`
-prints the identical render. The remaining sketch endpoints (files read,
-request-land/approve/reject, abandon, status as REST) arrive with their read models.
+Statuses: 400 broken protocol · 401 unauthorized · 422 domain refusal
+(`{"error": …}`) · 404/405 routing. Every MCP verb is reachable over REST —
+one dispatch, transports add reach, never capability (ADR-0006).
 
-Localhost bind by default (`--bind ip:port`); binding beyond loopback requires
-`--allow-remote`; auth is a dedicated pre-exposure slice.
+Localhost bind by default (`--bind ip:port`) needs no token; `--token <t>`
+requires `Authorization: Bearer <t>` on every request (both faces,
+constant-time compare). Binding beyond loopback requires `--allow-remote`
+**and** a token — the server refuses to start without one.
 
 ## 4. CLI (human face)
 

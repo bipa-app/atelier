@@ -98,10 +98,13 @@ enum Command {
         /// The ip:port the HTTP server binds.
         #[arg(long, default_value = "127.0.0.1:7423")]
         bind: String,
-        /// Allow a bind beyond loopback; auth arrives in a later slice,
-        /// so this exposes the workspace to whoever reaches the address.
+        /// Allow a bind beyond loopback; requires --token.
         #[arg(long)]
         allow_remote: bool,
+        /// Require this bearer token on every HTTP request; mandatory
+        /// beyond loopback.
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -131,7 +134,8 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
             http,
             bind,
             allow_remote,
-        } => serve(mcp_stdio, http, &bind, allow_remote),
+            token,
+        } => serve(mcp_stdio, http, &bind, allow_remote, token.as_deref()),
     }
 }
 
@@ -382,11 +386,17 @@ fn watch(debounce_ms: u64) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-fn serve(mcp_stdio: bool, http: bool, bind: &str, allow_remote: bool) -> Result<Vec<String>> {
+fn serve(
+    mcp_stdio: bool,
+    http: bool,
+    bind: &str,
+    allow_remote: bool,
+    token: Option<&str>,
+) -> Result<Vec<String>> {
     let root = env::current_dir().context("read the current directory")?;
     match (mcp_stdio, http) {
         (true, false) => atelier_surface::serve_stdio(&root)?,
-        (false, true) => atelier_surface::serve_http(&root, bind, allow_remote)?,
+        (false, true) => atelier_surface::serve_http(&root, bind, allow_remote, token)?,
         (true, true) => {
             bail!("atelier serve speaks one transport per process: --mcp-stdio or --http")
         }
