@@ -22,12 +22,12 @@ fn write_actor_config(config_home: &Path) {
     .expect("write actor config");
 }
 
-/// The path a `ws` process run in `dir` reports: its canonicalized cwd.
+/// The path a `atelier` process run in `dir` reports: its canonicalized cwd.
 fn canonical(dir: &Path) -> PathBuf {
     fs::canonicalize(dir).expect("canonicalize test dir")
 }
 
-/// A running `ws watch` child whose stdout arrives line by line.
+/// A running `atelier watch` child whose stdout arrives line by line.
 struct RunningWatch {
     child: Child,
     lines: Receiver<String>,
@@ -35,13 +35,13 @@ struct RunningWatch {
 
 impl RunningWatch {
     fn spawn(config_home: &Path, workspace: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ws"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_atelier"))
             .args(["watch", "--debounce-ms", "200"])
             .env("ATELIER_CONFIG_HOME", config_home)
             .current_dir(workspace)
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn ws watch");
+            .expect("spawn atelier watch");
         let stdout = child.stdout.take().expect("watch stdout is piped");
         Self {
             child,
@@ -66,8 +66,8 @@ impl RunningWatch {
     }
 
     fn kill(mut self) {
-        self.child.kill().expect("kill ws watch");
-        self.child.wait().expect("reap ws watch");
+        self.child.kill().expect("kill atelier watch");
+        self.child.wait().expect("reap atelier watch");
     }
 }
 
@@ -87,7 +87,7 @@ fn read_lines(stdout: ChildStdout) -> Receiver<String> {
 }
 
 fn ws(config_home: &Path, current_dir: &Path) -> assert_cmd::Command {
-    let mut command = assert_cmd::Command::cargo_bin("ws").expect("ws binary builds");
+    let mut command = assert_cmd::Command::cargo_bin("atelier").expect("atelier binary builds");
     command
         .env("ATELIER_CONFIG_HOME", config_home)
         .current_dir(current_dir);
@@ -120,7 +120,7 @@ fn watch_snapshots_external_edits_and_catches_up_after_a_stop() {
     assert_eq!(watch.next_line(), format!("watching {}", root.display()));
     let caught_up = watch.next_snapshot();
 
-    // A live external edit: snapshotted within the bound, no ws command.
+    // A live external edit: snapshotted within the bound, no atelier command.
     fs::write(workspace.path().join("notes.txt"), "one\ntwo\n").expect("append notes");
     let live = watch.next_snapshot();
     watch.kill();

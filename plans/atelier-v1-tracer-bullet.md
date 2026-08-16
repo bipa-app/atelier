@@ -31,8 +31,8 @@ Recorded as ADRs in `docs/adr/`; vocabulary in `CONTEXT.md`. Durable across all 
 - Projections are derived artifacts, cached by (blob, package version), never committed.
 - Journal is append-only and distinct from history; instruction capture = summary + run reference by default, verbatim per profile (ADR-0004).
 - Editing never needs a lease; landing always does. Optimistic concurrency by default.
-- Crate layout (all `publish = false`): `core`, `diff-core`, `format-docx`, `surface`, `cli` (binary `ws`). anyhow + tracing. No mod.rs.
-- Delivery surfaces: one core, three faces — the SDK (core library) is the product; `ws` CLI, MCP (stdio in v1, streamable HTTP post-v1), and REST are thin shells over one API; no shell-only behavior (ADR-0006).
+- Crate layout (all `publish = false`): `core`, `diff-core`, `format-docx`, `surface`, `cli` (binary `atelier`). anyhow + tracing. No mod.rs.
+- Delivery surfaces: one core, three faces — the SDK (core library) is the product; `atelier` CLI, MCP (stdio in v1, streamable HTTP post-v1), and REST are thin shells over one API; no shell-only behavior (ADR-0006).
 - Storage: content = git object store via jj (ADR-0002); journal = SQLite beside the repo, never inside it (ADR-0005); projections = content-addressed derived cache, evictable.
 - Agent surface verbs: `open_session`, `write`, `diff`, `land`, `journal` (MCP; HTTP transports are the M5 backlog slice, gated on M2).
 
@@ -69,13 +69,13 @@ Recorded as ADRs in `docs/adr/`; vocabulary in `CONTEXT.md`. Durable across all 
 
 #### What to build
 
-The complete degraded loop in one slice: `ws init` creates a workspace, `ws attach` binds a local folder source, any `ws` command snapshots outstanding edits (jj auto-snapshot), `ws diff` reports changes at the binary rung (added/removed/changed paths), and `ws journal` shows every act attributed to an actor. Cargo workspace bootstrap (5 crates, quality gates) happens inside this slice, not as a separate phase.
+The complete degraded loop in one slice: `atelier init` creates a workspace, `atelier attach` binds a local folder source, any `atelier` command snapshots outstanding edits (jj auto-snapshot), `atelier diff` reports changes at the binary rung (added/removed/changed paths), and `atelier journal` shows every act attributed to an actor. Cargo workspace bootstrap (5 crates, quality gates) happens inside this slice, not as a separate phase.
 
 #### Acceptance criteria
 
-- [ ] In a fresh temp dir: `ws init` then `ws attach <folder>` succeed; editing a file and running any `ws` command records a snapshot.
-- [ ] `ws diff` between the two latest snapshots names the changed path (binary rung).
-- [ ] `ws journal` lists the snapshot act attributed to the configured actor.
+- [ ] In a fresh temp dir: `atelier init` then `atelier attach <folder>` succeed; editing a file and running any `atelier` command records a snapshot.
+- [ ] `atelier diff` between the two latest snapshots names the changed path (binary rung).
+- [ ] `atelier journal` lists the snapshot act attributed to the configured actor.
 - [ ] An e2e test drives that round-trip; `cargo fmt --check`, `clippy --all-targets -- -D warnings`, `cargo test --workspace` are green.
 
 #### Risks / unknowns
@@ -95,11 +95,11 @@ The complete degraded loop in one slice: `ws init` creates a workspace, `ws atta
 
 #### What to build
 
-The fidelity ladder becomes real: `diff-core` gains projections and the text rung; `format-docx` ships as the first format package (projector only, docx → markdown). `ws diff` on a changed docx prints a readable markdown line diff; unknown formats keep the binary rung; plain text diffs as text.
+The fidelity ladder becomes real: `diff-core` gains projections and the text rung; `format-docx` ships as the first format package (projector only, docx → markdown). `atelier diff` on a changed docx prints a readable markdown line diff; unknown formats keep the binary rung; plain text diffs as text.
 
 #### Acceptance criteria
 
-- [ ] Given two versions of a fixture .docx, `ws diff` prints a markdown line diff containing the edited sentence — never "binary files differ".
+- [ ] Given two versions of a fixture .docx, `atelier diff` prints a markdown line diff containing the edited sentence — never "binary files differ".
 - [ ] Golden test: same docx blob + same package version → byte-identical projection.
 - [ ] A file of unknown format still diffs at the binary rung; .md/.txt diff as plain text (ladder covered by tests).
 
@@ -123,10 +123,10 @@ The agent round-trip over MCP: `open_session` returns the agent its own working 
 
 #### Acceptance criteria
 
-- [ ] A scripted MCP client opens a session, edits a file, lands — and the change is visible on the shared line via `ws log`.
+- [ ] A scripted MCP client opens a session, edits a file, lands — and the change is visible on the shared line via `atelier log`.
 - [ ] Two concurrent land requests: exactly one holds the lease; the other is refused or queued; a test proves no corruption.
-- [ ] `ws journal` shows the session with instruction summary and run reference.
-- [ ] The MCP `diff` tool returns the same diff `ws diff` shows for that change (both ends of the loop observed).
+- [ ] `atelier journal` shows the session with instruction summary and run reference.
+- [ ] The MCP `diff` tool returns the same diff `atelier diff` shows for that change (both ends of the loop observed).
 
 #### Risks / unknowns
 
@@ -144,11 +144,11 @@ The agent round-trip over MCP: `open_session` returns the agent its own working 
 
 #### What to build
 
-`ws watch` turns auto-snapshot continuous: external edits (Finder, any editor) become attributed snapshots within seconds, no `ws` command needed. The journal shows them; stop/restart catches up cleanly.
+`atelier watch` turns auto-snapshot continuous: external edits (Finder, any editor) become attributed snapshots within seconds, no `atelier` command needed. The journal shows them; stop/restart catches up cleanly.
 
 #### Acceptance criteria
 
-- [ ] With `ws watch` running, an external append to a file produces a snapshot within 5 seconds; `ws journal` shows the act attributed to the human actor.
+- [ ] With `atelier watch` running, an external append to a file produces a snapshot within 5 seconds; `atelier journal` shows the act attributed to the human actor.
 - [ ] Stopping the watcher stops snapshots; restarting catches up edits made while stopped (tests for both).
 - [ ] Engine internals (`.jj`, `.git`) are never snapshotted as content.
 

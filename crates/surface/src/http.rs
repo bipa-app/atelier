@@ -152,7 +152,7 @@ fn route(
         },
         (Method::Get, "/mcp") => error_route(405, "this server opens no server-initiated streams"),
         (Method::Get, "/v1/diff") => match workspace.diff_latest() {
-            // The exact lines `ws diff` prints for the same snapshots:
+            // The exact lines `atelier diff` prints for the same snapshots:
             // both faces render through render_diff (ADR-0006).
             Ok(diff) => {
                 let mut body = render_diff(&diff).join("\n");

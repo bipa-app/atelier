@@ -113,7 +113,7 @@ oh-my-pi splits two stores on purpose — content-addressed blobs (dedup, global
 
 ## 3. HTTP (M5, programmatic face) — shipped shape
 
-One process serves one workspace (`ws serve --http`), so paths carry no
+One process serves one workspace (`atelier serve --http`), so paths carry no
 workspace segment. MCP streamable HTTP and REST share the server — and the
 one dispatch behind it.
 
@@ -121,7 +121,7 @@ one dispatch behind it.
 POST /mcp                             MCP streamable HTTP: one JSON-RPC message per POST,
                                       answered as JSON; notifications → 202; GET → 405
                                       (no server-initiated streams in v1)
-GET  /v1/diff                         the workspace diff, text/plain — the exact lines `ws diff` prints
+GET  /v1/diff                         the workspace diff, text/plain — the exact lines `atelier diff` prints
 POST /v1/sessions                     open (actor, instruction)
 PUT  /v1/sessions/{s}/files/{path}    write; body is the content
 GET  /v1/sessions/{s}/diff
@@ -138,14 +138,14 @@ Localhost bind by default (`--bind ip:port`); binding beyond loopback requires
 
 ## 4. CLI (human face)
 
-`ws init` · `ws attach <src>` · `ws status` · `ws manifest` · `ws log` · `ws diff` · `ws journal` · `ws sessions` · `ws requests` · `ws approve <id>` · `ws reject <id>` · `ws land <session>` · `ws watch` · `ws undo <op>` · `ws serve [--mcp-stdio | --http]`
+`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier watch` · `atelier undo <op>` · `atelier serve [--mcp-stdio | --http]`
 
-The human review flow is the v1 demo: agent `request_land`s → human runs `ws requests`, reads the docx diff as markdown, `ws approve` → change lands.
+The human review flow is the v1 demo: agent `request_land`s → human runs `atelier requests`, reads the docx diff as markdown, `atelier approve` → change lands.
 
 ## 5. Configuration
 
 - **Config is input.** Global `~/.config/atelier/config.toml` (who am I) ⊂ workspace `.atelier/config.toml` (what this workspace is) ⊂ per-invocation flags. Precedence: invocation > workspace > global.
-- **Manifest is output.** `ws manifest` renders config + live state. Never hand-edited.
+- **Manifest is output.** `atelier manifest` renders config + live state. Never hand-edited.
 
 ```toml
 # global
@@ -172,7 +172,7 @@ Schema versioning from day one: `schema = 1`; SQLite `user_version` for the jour
 - **Approver = requester** → allowed in default profile, `SelfApprovalForbidden` in audit profiles.
 - **Concurrent applies** → one lease holder (SQLite claim); loser sees `LeaseHeld { holder, expires }` and retries. Requests queue naturally as open objects — only the apply serializes.
 - **Approve a parked request** → refused; resolve the conflict (follow-up session), new snapshot re-opens the gate.
-- **Crash mid-session / mid-apply** → sessions and requests are durable rows + real directories; `ws sessions` / `ws requests` list them; lease TTL frees a dead holder; nothing is auto-deleted.
+- **Crash mid-session / mid-apply** → sessions and requests are durable rows + real directories; `atelier sessions` / `atelier requests` list them; lease TTL frees a dead holder; nothing is auto-deleted.
 
 ### Snapshots, boundary & watch
 - **Huge file** → `FileTooLarge` skip, journaled, path listed outside-boundary until config raises the limit; the rest of the snapshot proceeds.
