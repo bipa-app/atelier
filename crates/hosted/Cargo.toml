@@ -6,7 +6,12 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+futures.workspace = true
+object_store.workspace = true
 rustyriver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

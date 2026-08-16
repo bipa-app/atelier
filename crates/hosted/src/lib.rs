@@ -6,13 +6,19 @@
 use std::fmt;
 use std::path::Path;
 
+pub mod ownership;
+// Re-exported so hosts (and tests) construct stores against the same
+// version the ownership plane speaks.
+pub use object_store;
+pub use ownership::{ClaimOutcome, Ownership, OwnershipRecord, file_url};
+
 use rustyriver::{Db, FileReplicaClient, Replica, ReplicaClient, TXID, restore};
 use tokio::runtime::Runtime;
 
 /// One failure in the hosted substrate, rendered for the caller's error
 /// surface.
 #[derive(Debug)]
-pub struct HostedError(String);
+pub struct HostedError(pub(crate) String);
 
 impl fmt::Display for HostedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -22,7 +28,7 @@ impl fmt::Display for HostedError {
 
 impl std::error::Error for HostedError {}
 
-fn hosted_err(source: impl fmt::Display) -> HostedError {
+pub(crate) fn hosted_err(source: impl fmt::Display) -> HostedError {
     HostedError(source.to_string())
 }
 
