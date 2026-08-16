@@ -24,13 +24,23 @@ const _: () = assert!(atelier_core::READ_WINDOW_MAX <= BODY_SIZE_MAX);
 /// one workspace, and the landing lease already serializes applies across
 /// processes. Prints the resolved address once listening, so a caller
 /// that bound port 0 learns where the server landed.
-pub fn serve_http(root: &Path, bind: &str, allow_remote: bool) -> Result<(), Error> {
+pub fn serve_http(
+    root: &Path,
+    bind: &str,
+    allow_remote: bool,
+    token: Option<&str>,
+) -> Result<(), Error> {
     let address: SocketAddr = bind
         .parse()
         .map_err(|_| Error::Config(format!("bind address {bind:?} is not ip:port")))?;
     if !address.ip().is_loopback() && !allow_remote {
         return Err(Error::Config(format!(
             "binding {address} exposes the workspace beyond this machine; pass --allow-remote to mean it"
+        )));
+    }
+    if !address.ip().is_loopback() && token.is_none() {
+        return Err(Error::Config(format!(
+            "binding {address} beyond loopback requires --token; every request must carry it"
         )));
     }
     let mut workspace = Workspace::open(root)?;
@@ -44,7 +54,15 @@ pub fn serve_http(root: &Path, bind: &str, allow_remote: bool) -> Result<(), Err
     let content_types = ContentTypes::new()?;
 
     for mut request in server.incoming_requests() {
-        let reply = reply(&mut workspace, &mut request, &content_types);
+        let reply = if authorized(&request, token) {
+            reply(&mut workspace, &mut request, &content_types)
+        } else {
+            Response::from_string(
+                json!({"error": "unauthorized: send Authorization: Bearer <token>"}).to_string(),
+            )
+            .with_status_code(401)
+            .with_header(content_types.json.clone())
+        };
         // A client gone before its response is its loss, never the
         // server's: the loop serves the next request.
         let _ = request.respond(reply);
@@ -97,6 +115,37 @@ fn reply(
             .with_header(content_types.text.clone()),
         Route::Accepted => Response::from_string(String::new()).with_status_code(202),
     }
+}
+
+/// Whether the request may speak to this workspace: without a configured
+/// token the server is an open loopback face; with one, every request
+/// must carry it as a bearer.
+fn authorized(request: &Request, token: Option<&str>) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    let provided = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("authorization"))
+        .map(|header| header.value.as_str());
+    let Some(provided) = provided else {
+        return false;
+    };
+    let Some(provided) = provided.strip_prefix("Bearer ") else {
+        return false;
+    };
+    token_matches(provided.as_bytes(), token.as_bytes())
+}
+
+/// Constant-time comparison: the reply must not say how much of the
+/// token matched. Iterates the expected length, leaking only that.
+fn token_matches(provided: &[u8], expected: &[u8]) -> bool {
+    let mut difference = u8::from(provided.len() != expected.len());
+    for (index, byte) in expected.iter().enumerate() {
+        difference |= byte ^ provided.get(index).copied().unwrap_or(0);
+    }
+    difference == 0
 }
 
 fn body(request: &mut Request) -> Result<String, Response<std::io::Cursor<Vec<u8>>>> {
@@ -165,6 +214,9 @@ fn route(
             }
             Err(error) => error_route(500, &error.to_string()),
         },
+        (Method::Get, "/v1/manifest") => text_model(workspace.manifest()),
+        (Method::Get, "/v1/status") => text_model(workspace.status()),
+        (Method::Get, "/v1/requests") => json_call(workspace, "landing_requests", &json!({})),
         (Method::Post, "/v1/sessions") => json_call(workspace, "open_session", &parse_args(body)),
         (Method::Get, "/v1/journal") => {
             let mut args = json!({});
@@ -176,12 +228,54 @@ fn route(
             }
             json_call(workspace, "journal", &args)
         }
-        _ => session_route(workspace, method, path, body),
+        _ => match path.strip_prefix("/v1/requests/") {
+            Some(rest) => request_route(workspace, method, rest, body),
+            None => session_route(workspace, method, path, query, body),
+        },
+    }
+}
+
+/// A read model as text/plain: the exact lines the CLI prints for the
+/// same state — every face renders through the one core (ADR-0006).
+fn text_model(model: Result<String, Error>) -> Route {
+    match model {
+        Ok(mut body) => {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            Route::Text { status: 200, body }
+        }
+        Err(error) => error_route(500, &error.to_string()),
+    }
+}
+
+/// The `/v1/requests/{id}/…` routes: the gate's verbs. The body may name
+/// the acting actor (`actor_name`, `actor_kind`) and a rejection `reason`.
+fn request_route(workspace: &mut Workspace, method: &Method, rest: &str, body: &str) -> Route {
+    let Some((id, action)) = rest.split_once('/') else {
+        return error_route(404, "no such resource");
+    };
+    let mut args = match parse_args(body) {
+        Value::Object(map) => Value::Object(map),
+        Value::Null => json!({}),
+        _ => return error_route(400, "the body must be a json object"),
+    };
+    args["request_id"] = json!(id);
+    match (method, action) {
+        (Method::Post, "approve") => json_call(workspace, "approve", &args),
+        (Method::Post, "reject") => json_call(workspace, "reject", &args),
+        _ => error_route(404, "no such resource"),
     }
 }
 
 /// The `/v1/sessions/{id}/…` routes: the same verbs the MCP tools speak.
-fn session_route(workspace: &mut Workspace, method: &Method, path: &str, body: &str) -> Route {
+fn session_route(
+    workspace: &mut Workspace,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    body: &str,
+) -> Route {
     let Some(rest) = path.strip_prefix("/v1/sessions/") else {
         return error_route(404, "no such resource");
     };
@@ -191,6 +285,26 @@ fn session_route(workspace: &mut Workspace, method: &Method, path: &str, body: &
     match (method, action) {
         (Method::Get, "diff") => json_call(workspace, "diff", &json!({"session_id": id})),
         (Method::Post, "land") => json_call(workspace, "land", &json!({"session_id": id})),
+        (Method::Post, "request-land") => {
+            json_call(workspace, "request_land", &json!({"session_id": id}))
+        }
+        (Method::Post, "abandon") => json_call(workspace, "abandon", &json!({"session_id": id})),
+        (Method::Get, file) if file.starts_with("files/") => {
+            let file_path = &file["files/".len()..];
+            if file_path.is_empty() {
+                return error_route(404, "no such resource");
+            }
+            let mut args = json!({"session_id": id, "path": file_path});
+            for name in ["start", "max_bytes"] {
+                if let Some(value) = query_value(query, name) {
+                    match value.parse::<u64>() {
+                        Ok(value) => args[name] = json!(value),
+                        Err(_) => return error_route(400, "start and max_bytes must be numbers"),
+                    }
+                }
+            }
+            json_call(workspace, "read", &args)
+        }
         (Method::Put, file) if file.starts_with("files/") => {
             let file_path = &file["files/".len()..];
             if file_path.is_empty() {
