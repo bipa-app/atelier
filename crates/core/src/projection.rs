@@ -103,6 +103,15 @@ impl ProjectionCache {
     }
 }
 
+/// A cache-key content id for bytes read outside the engine (a live
+/// working-copy file). SHA-256 hex is 64 characters, engine content ids
+/// are 40 — the two can never collide in the cache.
+pub(crate) fn content_id(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 fn hex_sha256(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());

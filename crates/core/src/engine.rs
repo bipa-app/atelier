@@ -2,21 +2,24 @@ use std::collections::BTreeMap;
 
 use atelier_diff_core::{Diff, diff_listings};
 use futures::{AsyncReadExt, StreamExt};
-use jj_lib::backend::{CommitId, TreeValue};
+use jj_lib::backend::{CommitId, Signature, Timestamp, TreeValue};
 use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::default_backend_factories::{
-    default_backend_factories, default_working_copy_factories,
+    default_backend_factories, default_working_copy_factories, default_working_copy_factory,
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
+use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::repo_path::RepoPath;
+use jj_lib::rewrite::rebase_commit;
 use jj_lib::settings::UserSettings;
 use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::Workspace as JjWorkspace;
 use pollster::block_on;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -62,6 +65,23 @@ pub(crate) enum Side {
     Blob(FileBlob),
 }
 
+/// What one landing attempt did to the shared line.
+pub(crate) enum LandOutcome {
+    Landed {
+        snapshot: String,
+    },
+    /// The rebase produced conflicts; nothing moved — the shared line
+    /// never carries a conflicted state (ADR-0007).
+    Conflicted,
+}
+
+/// How a snapshot enters history: the shared line stacks a new commit per
+/// state; a session amends its one change so the change id survives.
+enum SnapshotStyle {
+    Stack,
+    Amend,
+}
+
 /// The jj-backed engine: the only place jj types are allowed to appear.
 pub(crate) struct Engine {
     ws: JjWorkspace,
@@ -104,13 +124,27 @@ impl Engine {
         })
     }
 
+    /// Reload at the current operation head, folding in operations other
+    /// processes (the CLI beside a server) committed since this handle
+    /// loaded.
+    pub fn refresh(&mut self) -> Result<(), Error> {
+        self.repo = block_on(self.ws.repo_loader().load_at_head()).map_err(engine_err)?;
+        Ok(())
+    }
+
     /// Snapshot outstanding edits. Records a new commit only when the tree
     /// changed; returns the new snapshot id in that case.
     pub fn snapshot(&mut self) -> Result<Option<String>, Error> {
-        block_on(self.snapshot_async())
+        block_on(self.snapshot_with(&SnapshotStyle::Stack))
     }
 
-    async fn snapshot_async(&mut self) -> Result<Option<String>, Error> {
+    /// Snapshot outstanding edits by amending this workspace's commit: the
+    /// session's change id survives while its tree advances.
+    pub fn snapshot_amend(&mut self) -> Result<Option<String>, Error> {
+        block_on(self.snapshot_with(&SnapshotStyle::Amend))
+    }
+
+    async fn snapshot_with(&mut self, style: &SnapshotStyle) -> Result<Option<String>, Error> {
         let name = self.ws.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
@@ -156,12 +190,21 @@ impl Engine {
 
         let mut tx = self.repo.start_transaction();
         tx.set_is_snapshot(true);
-        let new_commit = tx
-            .repo_mut()
-            .new_commit(vec![wc_id], new_tree)
-            .write()
-            .await
-            .map_err(engine_err)?;
+        let new_commit = match style {
+            SnapshotStyle::Stack => tx
+                .repo_mut()
+                .new_commit(vec![wc_id], new_tree)
+                .write()
+                .await
+                .map_err(engine_err)?,
+            SnapshotStyle::Amend => tx
+                .repo_mut()
+                .rewrite_commit(&wc_commit)
+                .set_tree(new_tree)
+                .write()
+                .await
+                .map_err(engine_err)?,
+        };
         let new_id = new_commit.id().clone();
         tx.repo_mut()
             .set_wc_commit(name, new_id.clone())
@@ -214,6 +257,130 @@ impl Engine {
                 .cloned();
         }
         Ok(out)
+    }
+
+    /// This workspace's working-copy commit: the head of its line.
+    pub fn head(&self) -> Result<String, Error> {
+        Ok(self.wc_commit_id()?.hex())
+    }
+
+    /// The first parent of `id` — for a session's change, the shared-line
+    /// snapshot it forked from.
+    pub fn parent_of(&self, id: &str) -> Result<String, Error> {
+        let commit = self.commit_at(id)?;
+        match commit.parent_ids().first() {
+            Some(parent) => Ok(parent.hex()),
+            None => Err(Error::Engine(format!("snapshot {id} has no parent"))),
+        }
+    }
+
+    /// Create a session's own jj workspace at `root`: a working copy of the
+    /// shared head and a fresh change there, authored by `actor`. The new
+    /// change's id.
+    pub fn create_session_workspace(
+        &mut self,
+        root: &Path,
+        name: &str,
+        actor: &Actor,
+    ) -> Result<String, Error> {
+        block_on(self.create_session_workspace_async(root, name, actor))
+    }
+
+    async fn create_session_workspace_async(
+        &mut self,
+        root: &Path,
+        name: &str,
+        actor: &Actor,
+    ) -> Result<String, Error> {
+        let head_id = self.wc_commit_id()?;
+        let head = self.repo.store().get_commit(&head_id).map_err(engine_err)?;
+        fs::create_dir_all(root)?;
+        let (mut session_ws, repo) = JjWorkspace::init_workspace_with_existing_repo(
+            root,
+            self.ws.repo_path(),
+            &self.repo,
+            &*default_working_copy_factory(),
+            WorkspaceNameBuf::from(name),
+        )
+        .await
+        .map_err(engine_err)?;
+        let mut tx = repo.start_transaction();
+        let wc_commit = tx
+            .repo_mut()
+            .new_commit(vec![head_id], head.tree())
+            .set_author(signature(actor))
+            .write()
+            .await
+            .map_err(engine_err)?;
+        tx.repo_mut()
+            .edit(WorkspaceNameBuf::from(name), &wc_commit)
+            .await
+            .map_err(engine_err)?;
+        // `edit` abandons the placeholder commit the workspace registration
+        // created; the abandonment is a rewrite the transaction insists is
+        // propagated.
+        tx.repo_mut()
+            .rebase_descendants()
+            .await
+            .map_err(engine_err)?;
+        let repo = tx.commit("open session").await.map_err(engine_err)?;
+        session_ws
+            .check_out(repo.op_id().clone(), None, &wc_commit)
+            .await
+            .map_err(engine_err)?;
+        self.repo = repo;
+        Ok(wc_commit.change_id().hex())
+    }
+
+    /// Land `tip` onto the shared line: rebase it onto the head, refuse a
+    /// conflicted result, else advance the line and the working copy. The
+    /// caller holds the landing lease.
+    pub fn land(&mut self, tip: &str) -> Result<LandOutcome, Error> {
+        block_on(self.land_async(tip))
+    }
+
+    async fn land_async(&mut self, tip: &str) -> Result<LandOutcome, Error> {
+        let name = self.ws.workspace_name().to_owned();
+        let head_id = self.wc_commit_id()?;
+        let tip_commit = self.commit_at(tip)?;
+        let mut tx = self.repo.start_transaction();
+        let rebased = rebase_commit(tx.repo_mut(), tip_commit, vec![head_id])
+            .await
+            .map_err(engine_err)?;
+        if rebased.has_conflict() {
+            return Ok(LandOutcome::Conflicted);
+        }
+        tx.repo_mut()
+            .set_wc_commit(name, rebased.id().clone())
+            .map_err(engine_err)?;
+        tx.repo_mut()
+            .rebase_descendants()
+            .await
+            .map_err(engine_err)?;
+        let repo = tx.commit("land").await.map_err(engine_err)?;
+        self.repo = repo;
+        self.ws
+            .check_out(self.repo.op_id().clone(), None, &rebased)
+            .await
+            .map_err(engine_err)?;
+        Ok(LandOutcome::Landed {
+            snapshot: rebased.id().hex(),
+        })
+    }
+
+    fn wc_commit_id(&self) -> Result<CommitId, Error> {
+        let name = self.ws.workspace_name().to_owned();
+        match self.repo.view().get_wc_commit_id(&name) {
+            Some(id) => Ok(id.clone()),
+            None => Err(Error::Engine("no working-copy commit".to_owned())),
+        }
+    }
+
+    fn commit_at(&self, id: &str) -> Result<jj_lib::commit::Commit, Error> {
+        let Some(commit_id) = CommitId::try_from_hex(id) else {
+            return Err(Error::Engine(format!("not a snapshot id: {id}")));
+        };
+        self.repo.store().get_commit(&commit_id).map_err(engine_err)
     }
 
     /// Diff the latest snapshot against its first parent (empty tree if
@@ -330,15 +497,7 @@ impl Engine {
     }
 
     fn tree_at(&self, id: &str) -> Result<MergedTree, Error> {
-        let Some(commit_id) = CommitId::try_from_hex(id) else {
-            return Err(Error::Engine(format!("not a snapshot id: {id}")));
-        };
-        let commit = self
-            .repo
-            .store()
-            .get_commit(&commit_id)
-            .map_err(engine_err)?;
-        Ok(commit.tree())
+        Ok(self.commit_at(id)?.tree())
     }
 
     fn empty_tree(&self) -> Result<MergedTree, Error> {
@@ -371,6 +530,17 @@ fn build_settings(actor: &Actor) -> Result<UserSettings, Error> {
     let layer = ConfigLayer::parse(ConfigSource::User, &text).map_err(config_err)?;
     config.add_layer(layer);
     UserSettings::from_config(config).map_err(config_err)
+}
+
+/// The commit signature attributing a session's change to its actor; the
+/// synthetic address keeps the git backend satisfied, as in
+/// [`build_settings`].
+fn signature(actor: &Actor) -> Signature {
+    Signature {
+        name: actor.name.clone(),
+        email: format!("{}@atelier.local", actor.name),
+        timestamp: Timestamp::now(),
+    }
 }
 
 fn base_ignores() -> Result<Arc<GitIgnoreFile>, Error> {
