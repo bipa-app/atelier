@@ -555,3 +555,101 @@ fn boundary_paths_never_appear_in_deltas_or_log() {
         }
     }
 }
+
+/// A Word document from whole `w:p` fragments, zipped as a .docx.
+fn docx_of(paragraphs: &str) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}</w:body></w:document>"#
+    );
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    writer
+        .write_all(document.as_bytes())
+        .expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
+}
+
+#[test]
+fn a_combined_docx_edit_reports_every_change_at_its_own_rung() {
+    // One edit, four changes: rewritten text (text rung), a bolding
+    // (text rung, as markers), a paragraph insertion (text rung), and a
+    // size change (rich rung) — with the insertion shifting the sized
+    // paragraph's number. Nothing may drop, and each change reads at the
+    // highest rung that can carry it.
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+
+    let plain = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let formatted = |rpr: &str, text: &str| {
+        format!("<w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>{text}</w:t></w:r></w:p>")
+    };
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("report.docx"),
+        docx_of(&format!(
+            "{}{}{}",
+            plain("alpha original"),
+            plain("make this loud"),
+            formatted(r#"<w:sz w:val="22"/>"#, "resize this clause"),
+        )),
+    )
+    .unwrap();
+
+    let mut ws = Workspace::init(root.path()).unwrap();
+    ws.attach(source.path()).unwrap();
+
+    fs::write(
+        root.path().join("report.docx"),
+        docx_of(&format!(
+            "{}{}{}{}",
+            plain("alpha revised"),
+            plain("inserted between"),
+            formatted("<w:b/>", "make this loud"),
+            formatted(r#"<w:sz w:val="28"/>"#, "resize this clause"),
+        )),
+    )
+    .unwrap();
+
+    let diff = ws.diff_latest().unwrap();
+    assert_eq!(diff.deltas.len(), 2);
+
+    let anchor = &diff.deltas[0];
+    assert_eq!(anchor.address.as_str(), "report.docx");
+    assert_eq!(anchor.kind, DeltaKind::Changed);
+    assert_eq!(anchor.fidelity, Fidelity::Rich);
+    let lines: Vec<(LineKind, &str)> = anchor
+        .lines
+        .iter()
+        .map(|line| (line.kind, line.text.as_str()))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            (LineKind::Removed, "alpha original"),
+            (LineKind::Added, "alpha revised"),
+            (LineKind::Added, ""),
+            (LineKind::Added, "inserted between"),
+            (LineKind::Removed, "make this loud"),
+            (LineKind::Added, "**make this loud**"),
+        ],
+    );
+
+    let rich = &diff.deltas[1];
+    assert_eq!(rich.address.as_str(), "report.docx > paragraph 4");
+    assert_eq!(rich.fidelity, Fidelity::Rich);
+    assert_eq!(
+        rich.summary.as_deref(),
+        Some("\"resize this clause\" font size 11 → 14")
+    );
+    assert!(rich.lines.is_empty());
+}
