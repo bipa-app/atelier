@@ -438,3 +438,131 @@ fn a_bind_beyond_loopback_needs_the_explicit_flag() {
     child.kill().expect("kill the server");
     child.wait().expect("reap the server");
 }
+
+/// A one-paragraph Word document whose run carries `rpr`, zipped as .docx.
+fn formatted_docx(rpr: &str, sentence: &str) -> Vec<u8> {
+    use std::io::Cursor;
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>{sentence}</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    writer
+        .start_file("word/document.xml", options)
+        .expect("start fixture part");
+    std::io::Write::write_all(&mut writer, document.as_bytes()).expect("write fixture part");
+    writer
+        .finish()
+        .expect("finish fixture archive")
+        .into_inner()
+}
+
+#[test]
+fn a_rich_docx_delta_reads_the_same_over_http_and_the_cli() {
+    // The rich rung crosses the wire: a formatting-only edit — invisible
+    // to any line diff — reaches a curl script byte-for-byte as the CLI
+    // prints it, summary line included.
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+    fs::write(
+        workspace.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="22"/>"#, "resize this clause"),
+    )
+    .expect("write docx");
+    ws(config_home.path(), workspace.path())
+        .arg("journal")
+        .assert()
+        .success();
+    fs::write(
+        workspace.path().join("report.docx"),
+        formatted_docx(r#"<w:sz w:val="28"/>"#, "resize this clause"),
+    )
+    .expect("resize docx");
+
+    let server = HttpServer::spawn(config_home.path(), workspace.path());
+    let (status, body) = server.request("GET", "/v1/diff", "");
+    server.kill();
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        "M report.docx\nM report.docx > paragraph 1\n  \"resize this clause\" font size 11 → 14\n"
+    );
+    let cli = ws(config_home.path(), workspace.path())
+        .arg("diff")
+        .assert()
+        .success();
+    let cli_diff = String::from_utf8(cli.get_output().stdout.clone()).expect("diff is utf-8");
+    assert_eq!(body, cli_diff);
+}
+
+#[test]
+fn the_error_surface_answers_by_the_book() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+    let server = HttpServer::spawn(config_home.path(), workspace.path());
+
+    // Routing: unknown resources 404, a stream request 405.
+    let (status, body) = server.request("GET", "/nope", "");
+    assert_eq!(
+        (status, body.as_str()),
+        (404, "{\"error\":\"no such resource\"}")
+    );
+    let (status, _) = server.request("GET", "/mcp", "");
+    assert_eq!(status, 405);
+
+    // Broken protocol answers 400: a session open without its actor, a
+    // journal limit that is not a number.
+    let (status, _) = server.request("POST", "/v1/sessions", "{}");
+    assert_eq!(status, 400);
+    let (status, body) = server.request("GET", "/v1/journal?limit=abc", "");
+    assert_eq!(
+        (status, body.as_str()),
+        (400, "{\"error\":\"limit must be a number\"}")
+    );
+
+    // Domain refusals answer 422 and name the refusal.
+    let (status, body) = server.request("GET", "/v1/sessions/s99/diff", "");
+    assert_eq!(status, 422);
+    assert_eq!(body, "{\"error\":\"no session s99\"}");
+
+    // A working-copy escape refuses like any domain rule.
+    let session = server.json(
+        "POST",
+        "/v1/sessions",
+        &serde_json::json!({
+            "actor_name": "edge-agent", "actor_kind": "agent",
+            "instruction_summary": "probe the error surface",
+        }),
+    );
+    assert_eq!(session["session_id"], "s1");
+    let (status, body) = server.request("PUT", "/v1/sessions/s1/files/../escape.txt", "gotcha");
+    assert_eq!(status, 422);
+    assert_eq!(
+        body,
+        "{\"error\":\"path ../escape.txt leaves the session working copy\"}"
+    );
+
+    // MCP over HTTP: a notification is consumed (202, empty), a parse
+    // error answers as JSON-RPC, not as transport failure.
+    let (status, body) = server.request(
+        "POST",
+        "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+    );
+    assert_eq!((status, body.as_str()), (202, ""));
+    let (status, body) = server.request("POST", "/mcp", "this is not json");
+    assert_eq!(status, 200);
+    let message: Value = serde_json::from_str(&body).expect("json-rpc error is json");
+    assert_eq!(message["error"]["code"], -32700);
+
+    // A body past the cap answers 413 before any dispatch.
+    let oversized = "x".repeat(8 * 1024 * 1024 + 1);
+    let (status, _) = server.request("PUT", "/v1/sessions/s1/files/big.txt", &oversized);
+    assert_eq!(status, 413);
+
+    server.kill();
+}
