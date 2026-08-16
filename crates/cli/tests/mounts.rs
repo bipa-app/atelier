@@ -1,5 +1,9 @@
 //! Mounted sources end to end: two projects with their own histories under
 //! one workspace, read through the human face (ADR-0009, N0).
+#![expect(
+    clippy::too_many_lines,
+    reason = "a test tells one story end to end; fragmenting it would hide the transition being pinned"
+)]
 
 use std::fs;
 use std::path::Path;

@@ -4,7 +4,7 @@ use crate::error::Error;
 
 /// The most bytes one read returns; also the default window. No unbounded
 /// responses exist on the surface.
-pub const MAX_READ_WINDOW: usize = 50_000;
+pub const READ_WINDOW_MAX: usize = 50_000;
 
 /// Where in the text a read's content sits, in bytes of the text read —
 /// the projection's for a projected document, the document's own otherwise.
@@ -27,13 +27,13 @@ pub struct ReadResult {
     pub projected_by: Option<PackageId>,
 }
 
-/// The window size a caller asked for, bounded to `1..=MAX_READ_WINDOW`.
+/// The window size a caller asked for, bounded to `1..=READ_WINDOW_MAX`.
 pub(crate) fn window_size(requested: Option<usize>) -> Result<usize, Error> {
     match requested {
-        None => Ok(MAX_READ_WINDOW),
-        Some(size) if (1..=MAX_READ_WINDOW).contains(&size) => Ok(size),
+        None => Ok(READ_WINDOW_MAX),
+        Some(size) if (1..=READ_WINDOW_MAX).contains(&size) => Ok(size),
         Some(_) => Err(Error::WindowTooLarge {
-            max: MAX_READ_WINDOW,
+            max: READ_WINDOW_MAX,
         }),
     }
 }
@@ -50,6 +50,14 @@ pub(crate) fn window_text(
     let total = text.len();
     let start = snap_forward(text, start.min(total));
     let end = snap_back(text, start.saturating_add(size).min(total)).max(start);
+    // Every face trusts these window invariants; hold them here, where
+    // the window is built.
+    assert!(start <= end);
+    assert!(end <= total);
+    assert!(
+        end - start <= size + 3,
+        "a boundary snap moves at most one character"
+    );
     ReadResult {
         content: text[start..end].to_owned(),
         window: ReadWindow { start, end, total },
@@ -74,7 +82,7 @@ fn snap_back(text: &str, mut at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_READ_WINDOW, window_size, window_text};
+    use super::{READ_WINDOW_MAX, window_size, window_text};
 
     #[test]
     fn windows_chain_through_the_text_and_reassemble_it() {
@@ -123,9 +131,9 @@ mod tests {
 
     #[test]
     fn window_sizes_are_bounded() {
-        assert_eq!(window_size(None).unwrap(), MAX_READ_WINDOW);
+        assert_eq!(window_size(None).unwrap(), READ_WINDOW_MAX);
         assert_eq!(window_size(Some(1)).unwrap(), 1);
         assert!(window_size(Some(0)).is_err());
-        assert!(window_size(Some(MAX_READ_WINDOW + 1)).is_err());
+        assert!(window_size(Some(READ_WINDOW_MAX + 1)).is_err());
     }
 }

@@ -19,7 +19,7 @@ use crate::config::{
     read_workspace_config, resolve_actor, write_workspace_config,
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
-use crate::engine::{DiffSides, Engine, FileBlob, LandOutcome, MAX_LADDER_FILE_SIZE, Side};
+use crate::engine::{DiffSides, Engine, FileBlob, LADDER_FILE_SIZE_MAX, LandOutcome, Side};
 use crate::error::{Error, config_err, engine_err};
 use crate::journal::{Act, Journal, JournalEntry};
 use crate::landing::{Approval, GateOutcome, Landing, LandingRequest, RequestId, RequestState};
@@ -188,7 +188,7 @@ impl Workspace {
 
         self.auto_snapshot()?;
 
-        copy_tree(folder, &self.root)?;
+        copy_tree(folder, &self.root, &SKIP_NAMES)?;
         let source = Source {
             kind: SourceKind::LocalFolder,
             path: folder.to_path_buf(),
@@ -214,27 +214,10 @@ impl Workspace {
     /// history, at `root/<name>` (ADR-0009).
     pub fn attach_mount(&mut self, folder: impl AsRef<Path>, name: &str) -> Result<Source, Error> {
         let folder = folder.as_ref();
-        if !folder.is_dir() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("source folder not found: {}", folder.display()),
-            )));
-        }
-        valid_mount_name(name)?;
         let control = self.root.join(CONTROL_DIR);
         let mut config = read_workspace_config(&control)?;
-        if config.sources.iter().any(|s| s.mount == name) {
-            return Err(Error::AlreadyAttached);
-        }
         let mount_dir = self.root.join(name);
-        if mount_dir.exists() {
-            return Err(Error::Config(format!(
-                "mount {name:?} collides with existing workspace content"
-            )));
-        }
-        if folder_uses_lfs(folder)? {
-            return Err(Error::LfsSourceUnsupported);
-        }
+        attach_refusals(folder, name, &config, &mount_dir)?;
 
         // Settle every engine before the boundary moves.
         self.auto_snapshot()?;
@@ -245,14 +228,14 @@ impl Workspace {
         // repo plain git pushes (ADR-0009).
         let adopts_git = folder.join(".git").is_dir();
         let (kind, mut engine) = if adopts_git {
-            copy_tree_with_git(folder, &mount_dir)?;
+            copy_tree(folder, &mount_dir, &[".atelier", ".jj"])?;
             (
                 SourceKind::LocalGit,
                 Engine::adopt_git(&mount_dir, &self.actor, &[])?,
             )
         } else {
             let engine = Engine::init(&mount_dir, &self.actor, &[])?;
-            copy_tree(folder, &mount_dir)?;
+            copy_tree(folder, &mount_dir, &SKIP_NAMES)?;
             (SourceKind::LocalFolder, engine)
         };
         let snapshot = engine.snapshot()?;
@@ -1658,7 +1641,7 @@ impl Workspace {
     /// journal records the degradation so it is never silent.
     fn file_too_large(&self, address: &str) -> Result<(), Error> {
         let reference = format!(
-            "{address} exceeds the {MAX_LADDER_FILE_SIZE}-byte ladder cap; kept at the binary rung"
+            "{address} exceeds the {LADDER_FILE_SIZE_MAX}-byte ladder cap; kept at the binary rung"
         );
         let entry = self.entry(Act::FileTooLarge, Some(reference))?;
         self.journal.append(&entry)
@@ -1771,40 +1754,53 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
 /// them identical (ADR-0010).
 fn folder_fingerprint(folder: &Path) -> Result<String, Error> {
     let mut hasher = Sha256::new();
-    hash_folder(&mut hasher, folder, folder)?;
+    hash_folder(&mut hasher, folder)?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn hash_folder(hasher: &mut Sha256, root: &Path, dir: &Path) -> Result<(), Error> {
-    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Err(Error::Engine(format!(
-                "cannot fingerprint a non-utf8 name at {}",
-                entry.path().display()
-            )));
-        };
-        if SKIP_NAMES.contains(&name) {
-            continue;
+fn hash_folder(hasher: &mut Sha256, root: &Path) -> Result<(), Error> {
+    // An explicit work stack bounds the walk by entry count, never call
+    // depth; entries hash sorted by relative path for determinism.
+    let mut files: Vec<(String, PathBuf, bool)> = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(Error::Engine(format!(
+                    "cannot fingerprint a non-utf8 name at {}",
+                    entry.path().display()
+                )));
+            };
+            if SKIP_NAMES.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .map_err(engine_err)?
+                    .to_string_lossy()
+                    .into_owned();
+                files.push((rel, path, file_type.is_symlink()));
+            }
         }
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        let rel = path.strip_prefix(root).map_err(engine_err)?;
-        if file_type.is_dir() {
-            hash_folder(hasher, root, &path)?;
-        } else if file_type.is_symlink() {
-            hasher.update(rel.to_string_lossy().as_bytes());
+    }
+    files.sort();
+    for (rel, path, is_symlink) in &files {
+        hasher.update(rel.as_bytes());
+        if *is_symlink {
             hasher.update([1]);
-            hasher.update(fs::read_link(&path)?.to_string_lossy().as_bytes());
-            hasher.update([0]);
+            hasher.update(fs::read_link(path)?.to_string_lossy().as_bytes());
         } else {
-            hasher.update(rel.to_string_lossy().as_bytes());
             hasher.update([2]);
-            hasher.update(fs::read(&path)?);
-            hasher.update([0]);
+            hasher.update(fs::read(path)?);
         }
+        hasher.update([0]);
     }
     Ok(())
 }
@@ -1819,6 +1815,36 @@ fn adopted_branch(source: &Path) -> Result<Option<String>, Error> {
         .strip_prefix("ref: refs/heads/")
         .map(str::to_owned))
 }
+/// Everything that refuses a mount attach, each by name: a missing
+/// folder, an invalid mount name, a source already attached, a mount
+/// colliding with workspace content, an LFS-bearing source (ADR-0002).
+fn attach_refusals(
+    folder: &Path,
+    name: &str,
+    config: &WorkspaceConfig,
+    mount_dir: &Path,
+) -> Result<(), Error> {
+    if !folder.is_dir() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("source folder not found: {}", folder.display()),
+        )));
+    }
+    valid_mount_name(name)?;
+    if config.sources.iter().any(|s| s.mount == name) {
+        return Err(Error::AlreadyAttached);
+    }
+    if mount_dir.exists() {
+        return Err(Error::Config(format!(
+            "mount {name:?} collides with existing workspace content"
+        )));
+    }
+    if folder_uses_lfs(folder)? {
+        return Err(Error::LfsSourceUnsupported);
+    }
+    Ok(())
+}
+
 fn folder_uses_lfs(folder: &Path) -> Result<bool, Error> {
     let gitattributes = folder.join(".gitattributes");
     if !gitattributes.is_file() {
@@ -1828,42 +1854,27 @@ fn folder_uses_lfs(folder: &Path) -> Result<bool, Error> {
     Ok(text.contains("filter=lfs"))
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if SKIP_NAMES.iter().any(|skip| name == **skip) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if from.is_dir() {
-            fs::create_dir_all(&to)?;
-            copy_tree(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Copy a source tree keeping its `.git` — the adoption path needs the
-/// repository itself, not just its files. `.atelier` and `.jj` still stay
-/// behind: they are engine internals, never source content.
-fn copy_tree_with_git(src: &Path, dst: &Path) -> Result<(), Error> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".atelier" || name == ".jj" {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if from.is_dir() {
-            fs::create_dir_all(&to)?;
-            copy_tree_with_git(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
+/// Copy `source` into `target`, skipping `skips` at any depth. The import
+/// path skips every engine-internal name; the adoption path keeps `.git` —
+/// the repository itself is the content. An explicit work stack bounds the
+/// walk by entry count, never call depth.
+fn copy_tree(source: &Path, target: &Path, skips: &[&str]) -> Result<(), Error> {
+    let mut pending = vec![(source.to_path_buf(), target.to_path_buf())];
+    while let Some((from_dir, to_dir)) = pending.pop() {
+        for entry in fs::read_dir(&from_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if skips.iter().any(|skip| name == **skip) {
+                continue;
+            }
+            let from = entry.path();
+            let to = to_dir.join(&name);
+            if from.is_dir() {
+                fs::create_dir_all(&to)?;
+                pending.push((from, to));
+            } else {
+                fs::copy(&from, &to)?;
+            }
         }
     }
     Ok(())

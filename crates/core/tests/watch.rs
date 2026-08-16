@@ -1,3 +1,6 @@
+//! The watch loop's core: filesystem events fold into one attributed
+//! snapshot after quiet time; internals never trigger; stop is clean.
+
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};

@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 
 use quick_xml::escape::resolve_xml_entity;
-use quick_xml::events::{BytesRef, BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 use thiserror::Error;
@@ -45,7 +46,7 @@ const NUMBERING_TYPES: [&str; 2] = [
 /// a few megabytes; anything past this is a decompression bomb, not a
 /// document — the outer file cap alone cannot bound it, deflate expands
 /// three orders of magnitude.
-const MAX_PART_SIZE: u64 = 64 * 1024 * 1024;
+const PART_SIZE_MAX: u64 = 64 * 1024 * 1024;
 
 /// The namespaces `WordprocessingML` elements live in: the transitional one
 /// Word writes, and the ISO strict variant.
@@ -60,10 +61,10 @@ const WORDPROCESSINGML: [&[u8]; 2] = [
 const MARKUP_COMPATIBILITY: &[u8] = b"http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 /// Markdown headings stop at six `#`s; deeper Word headings clamp to it.
-const MAX_HEADING_LEVEL: usize = 6;
+const HEADING_LEVEL_MAX: usize = 6;
 
 /// Word's list levels run 0..=8 (`w:ilvl`).
-const MAX_LIST_LEVEL: usize = 8;
+const LIST_LEVEL_MAX: usize = 8;
 
 /// `w:outlineLvl` runs 0..=8 for outline levels; 9 means body text.
 const OUTLINE_BODY_TEXT: usize = 9;
@@ -246,37 +247,25 @@ fn relationship_target(
                 frame.end(relationships, end.local_name().as_ref())?;
             }
             (_, Event::Text(text)) => {
-                let content = text.xml10_content().map_err(quick_xml::Error::from)?;
-                ensure_xml_chars(&content)?;
+                let content = character_data(&text)?;
                 frame.characters(xml_whitespace_only(&content))?;
             }
             (_, Event::CData(data)) => {
-                let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&data, "CDATA")?;
                 frame.characters(false)?;
             }
             (_, Event::GeneralRef(reference)) => {
-                ensure_xml_chars(&resolve_reference(&reference)?)?;
+                resolve_reference(&reference)?;
                 frame.characters(false)?;
             }
             (_, Event::Decl(_) | Event::DocType(_)) => {
                 frame.prolog_declaration()?;
             }
             (_, Event::Comment(text)) => {
-                let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&text, "comment")?;
             }
             (_, Event::PI(instruction)) => {
-                let content = std::str::from_utf8(&instruction).map_err(|_| {
-                    DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_owned(),
-                    )
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&instruction, "processing-instruction")?;
             }
             (_, Event::Eof) => {
                 frame.eof()?;
@@ -374,10 +363,10 @@ fn part(archive: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<Option<St
         Err(error) => return Err(DocxError::Zip(error)),
     };
     let mut bytes = Vec::new();
-    part.take(MAX_PART_SIZE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_PART_SIZE {
+    part.take(PART_SIZE_MAX + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PART_SIZE_MAX {
         return Err(DocxError::Structure(format!(
-            "{name} inflates past {MAX_PART_SIZE} bytes"
+            "{name} inflates past {PART_SIZE_MAX} bytes"
         )));
     }
     decoded(bytes, name).map(Some)
@@ -545,12 +534,7 @@ pub(crate) trait BodySink {
 pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), DocxError> {
     let mut reader = NsReader::from_str(xml);
     let mut frame = PartFrame::new("document", b"document");
-    // The depth a masked subtree opened at, while one is open. Two kinds
-    // mask: `mc:Choice` branches (this projector supports no extensions,
-    // so only the Fallback projects) and text-box containers in ANY
-    // namespace — strict documents wrap them as `wne:txbxContent`, and
-    // descending into their paragraphs would corrupt the body walk.
-    let mut choice_at: Option<usize> = None;
+    let mut mask = Mask::document();
 
     loop {
         match reader.read_resolved_event()? {
@@ -558,15 +542,9 @@ pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), Docx
                 frame.start()?;
                 let resolve = checked(resolve)?;
                 let wordprocessingml = in_wordprocessingml(&resolve);
-                if choice_at.is_none()
-                    && (in_markup_compatibility(&resolve)
-                        && start.local_name().as_ref() == b"Choice"
-                        || start.local_name().as_ref() == b"txbxContent")
-                {
-                    choice_at = Some(frame.depth);
-                }
+                mask.open(&resolve, start.local_name().as_ref(), frame.depth);
                 resolved_attributes(&reader, &start)?;
-                if wordprocessingml && choice_at.is_none() {
+                if wordprocessingml && !mask.active() {
                     sink.open(&reader, &start)?;
                 }
             }
@@ -574,7 +552,7 @@ pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), Docx
                 let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
                 frame.empty(wordprocessingml, start.local_name().as_ref())?;
                 resolved_attributes(&reader, &start)?;
-                if wordprocessingml && choice_at.is_none() {
+                if wordprocessingml && !mask.active() {
                     sink.open(&reader, &start)?;
                     sink.close(start.local_name().as_ref())?;
                 }
@@ -582,10 +560,7 @@ pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), Docx
             (resolve, Event::End(end)) => {
                 let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
                 frame.end(wordprocessingml, end.local_name().as_ref())?;
-                if let Some(depth) = choice_at {
-                    if frame.depth < depth {
-                        choice_at = None;
-                    }
+                if mask.ends(frame.depth) {
                     continue;
                 }
                 if wordprocessingml {
@@ -593,47 +568,32 @@ pub(crate) fn walk_body<S: BodySink>(xml: &str, sink: &mut S) -> Result<(), Docx
                 }
             }
             (_, Event::Text(text)) => {
-                let content = text.xml10_content().map_err(quick_xml::Error::from)?;
-                ensure_xml_chars(&content)?;
+                let content = character_data(&text)?;
                 frame.characters(xml_whitespace_only(&content))?;
-                if choice_at.is_none() {
+                if !mask.active() {
                     sink.text(&normalized_eol(&content))?;
                 }
             }
             (_, Event::CData(data)) => {
-                let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                let content = utf8_content(&data, "CDATA")?;
                 frame.characters(false)?;
-                if choice_at.is_none() {
+                if !mask.active() {
                     sink.text(&normalized_eol(content))?;
                 }
             }
             (_, Event::GeneralRef(reference)) => {
                 frame.characters(false)?;
                 let content = resolve_reference(&reference)?;
-                ensure_xml_chars(&content)?;
-                if choice_at.is_none() {
+                if !mask.active() {
                     sink.text(&content)?;
                 }
             }
-            (_, Event::Decl(_) | Event::DocType(_)) => {
-                frame.prolog_declaration()?;
-            }
+            (_, Event::Decl(_) | Event::DocType(_)) => frame.prolog_declaration()?,
             (_, Event::Comment(text)) => {
-                let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&text, "comment")?;
             }
             (_, Event::PI(instruction)) => {
-                let content = std::str::from_utf8(&instruction).map_err(|_| {
-                    DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_owned(),
-                    )
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&instruction, "processing-instruction")?;
             }
             (_, Event::Eof) => {
                 frame.eof()?;
@@ -689,6 +649,26 @@ fn ensure_xml_chars(text: &str) -> Result<(), DocxError> {
     }
 }
 
+/// Content bytes decoded as UTF-8 and checked against XML's character
+/// set. Comments, processing instructions, and CDATA carry no markup,
+/// but malformed bytes or forbidden characters in them still mark a
+/// malformed document.
+fn utf8_content<'b>(bytes: &'b [u8], label: &str) -> Result<&'b str, DocxError> {
+    let content = std::str::from_utf8(bytes)
+        .map_err(|_| DocxError::Structure(format!("{label} content is not valid UTF-8")))?;
+    ensure_xml_chars(content)?;
+    Ok(content)
+}
+
+/// One text event's character data under XML 1.0 content rules, checked
+/// against the XML character set. End-of-line normalization stays with
+/// the body walk — only text a sink consumes needs it.
+fn character_data<'a>(text: &BytesText<'a>) -> Result<Cow<'a, str>, DocxError> {
+    let content = text.xml10_content().map_err(quick_xml::Error::from)?;
+    ensure_xml_chars(&content)?;
+    Ok(content)
+}
+
 fn in_wordprocessingml(resolve: &ResolveResult<'_>) -> bool {
     matches!(resolve, ResolveResult::Bound(Namespace(ns)) if WORDPROCESSINGML.contains(ns))
 }
@@ -707,6 +687,67 @@ fn checked(resolve: ResolveResult<'_>) -> Result<ResolveResult<'_>, DocxError> {
         )));
     }
     Ok(resolve)
+}
+
+/// The masked subtree open right now, when one is: the depth its
+/// container opened at. `mc:Choice` branches mask in every walk — this
+/// projector supports no extensions, so only the `Fallback` branch
+/// contributes — and text-box containers in ANY namespace (strict
+/// documents wrap them as `wne:txbxContent`) mask only the document
+/// body, where descending into their paragraphs would corrupt the walk.
+struct Mask {
+    /// Whether text-box containers mask, besides `mc:Choice` branches.
+    text_boxes: bool,
+    at: Option<usize>,
+}
+
+impl Mask {
+    /// The document-body mask: `mc:Choice` branches and text boxes.
+    fn document() -> Self {
+        Self {
+            text_boxes: true,
+            at: None,
+        }
+    }
+
+    /// The auxiliary-part mask: `mc:Choice` branches only.
+    fn auxiliary() -> Self {
+        Self {
+            text_boxes: false,
+            at: None,
+        }
+    }
+
+    /// Whether events right now sit inside a masked subtree.
+    fn active(&self) -> bool {
+        self.at.is_some()
+    }
+
+    /// Opens the mask when `local_name` begins a masked container at
+    /// `depth` and none is open — a mask never nests inside another.
+    fn open(&mut self, resolve: &ResolveResult<'_>, local_name: &[u8], depth: usize) {
+        if self.at.is_some() {
+            return;
+        }
+        if in_markup_compatibility(resolve) && local_name == b"Choice"
+            || self.text_boxes && local_name == b"txbxContent"
+        {
+            self.at = Some(depth);
+        }
+    }
+
+    /// Whether the element close that popped to `depth` is still masked:
+    /// every close inside the mask is, and the container's own close —
+    /// `depth` drops below where it opened — releases the mask last.
+    fn ends(&mut self, depth: usize) -> bool {
+        let Some(at) = self.at else {
+            return false;
+        };
+        if depth < at {
+            self.at = None;
+        }
+        true
+    }
 }
 
 /// How a numbering level marks its items: numbered, bulleted, or — for
@@ -980,21 +1021,7 @@ impl BodySink for Document<'_> {
         let name = start.local_name();
         if SKIPPED_SUBTREES.contains(&name.as_ref()) {
             if name.as_ref() == b"del" {
-                if self.in_row_properties {
-                    if let Some(row) = self
-                        .tables
-                        .last_mut()
-                        .and_then(|table| table.rows.last_mut())
-                    {
-                        row.deleted = true;
-                    }
-                } else if self.in_properties {
-                    // A deleted paragraph mark (w:pPr/w:rPr/w:del): the
-                    // accepted body merges this paragraph into the next.
-                    if let Some(paragraph) = self.paragraph.as_mut() {
-                        paragraph.mark_deleted = true;
-                    }
-                }
+                self.deletion_mark();
             }
             self.skipping = 1;
             return Ok(());
@@ -1007,43 +1034,12 @@ impl BodySink for Document<'_> {
             // A tracked cell deletion: the cell leaves the accepted body,
             // like rows marked deleted in their trPr.
             b"cellDel" if self.in_cell_properties => {
-                if let Some(cell) = self
-                    .tables
-                    .last_mut()
-                    .and_then(|table| table.rows.last_mut())
-                    .and_then(|row| row.cells.last_mut())
-                {
+                if let Some(cell) = self.open_cell() {
                     cell.deleted = true;
                 }
             }
-            b"pStyle" if self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.style = attribute(reader, start, b"val")?;
-                }
-            }
-            b"outlineLvl" if self.in_properties => {
-                if let (Some(paragraph), Some(value)) =
-                    (self.paragraph.as_mut(), attribute(reader, start, b"val")?)
-                {
-                    paragraph.outline = Some(outline_level(&value)?);
-                }
-            }
-            b"numPr" if self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.listed = true;
-                }
-            }
-            b"numId" if self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.num_id = attribute(reader, start, b"val")?;
-                }
-            }
-            b"ilvl" if self.in_properties => {
-                if let (Some(paragraph), Some(level)) =
-                    (self.paragraph.as_mut(), attribute(reader, start, b"val")?)
-                {
-                    paragraph.level = list_level(&level)?;
-                }
+            b"pStyle" | b"outlineLvl" | b"numPr" | b"numId" | b"ilvl" if self.in_properties => {
+                self.paragraph_property(reader, start)?;
             }
             b"r" => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
@@ -1051,50 +1047,16 @@ impl BodySink for Document<'_> {
                 }
             }
             b"rPr" if !self.in_properties => self.in_run_properties = true,
-            b"b" if self.in_run_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.run.bold = on_off(attribute(reader, start, b"val")?.as_deref())?;
-                }
-            }
-            b"i" if self.in_run_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.run.italic = on_off(attribute(reader, start, b"val")?.as_deref())?;
-                }
-            }
-            b"strike" if self.in_run_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.run.strike = on_off(attribute(reader, start, b"val")?.as_deref())?;
-                }
+            b"b" | b"i" | b"strike" if self.in_run_properties => {
+                self.run_property(reader, start)?;
             }
             b"t" => self.in_text = true,
-            b"tab" if !self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.append("\t");
-                }
+            b"tab" | b"sym" | b"noBreakHyphen" | b"softHyphen" if !self.in_properties => {
+                self.run_character(reader, start)?;
             }
             b"br" | b"cr" => {
                 if let Some(paragraph) = self.paragraph.as_mut() {
                     paragraph.break_line();
-                }
-            }
-            // Visible inline characters Word encodes as elements: erasing
-            // them would project distinct sentences identically.
-            b"sym" if !self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    let value = attribute(reader, start, b"char")?.ok_or_else(|| {
-                        DocxError::Structure("sym without a char attribute".to_owned())
-                    })?;
-                    paragraph.append(&sym_char(&value)?.to_string());
-                }
-            }
-            b"noBreakHyphen" if !self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.append("\u{2011}");
-                }
-            }
-            b"softHyphen" if !self.in_properties => {
-                if let Some(paragraph) = self.paragraph.as_mut() {
-                    paragraph.append("\u{00ad}");
                 }
             }
             b"tbl" => self.tables.push(Table::default()),
@@ -1104,11 +1066,7 @@ impl BodySink for Document<'_> {
                     return Err(DocxError::Structure("table row outside a table".to_owned()));
                 }
             },
-            b"tc" => match self
-                .tables
-                .last_mut()
-                .and_then(|table| table.rows.last_mut())
-            {
+            b"tc" => match self.open_row() {
                 Some(row) => row.cells.push(Cell::default()),
                 None => {
                     return Err(DocxError::Structure(
@@ -1195,6 +1153,111 @@ impl BodySink for Document<'_> {
 }
 
 impl Document<'_> {
+    /// A tracked deletion mark (`w:del`) applied to what it annotates: in
+    /// row properties it deletes the row; on a paragraph mark (inside
+    /// `w:pPr/w:rPr`) the accepted body merges this paragraph into the
+    /// next.
+    fn deletion_mark(&mut self) {
+        if self.in_row_properties {
+            if let Some(row) = self.open_row() {
+                row.deleted = true;
+            }
+        } else if self.in_properties
+            && let Some(paragraph) = self.paragraph.as_mut()
+        {
+            paragraph.mark_deleted = true;
+        }
+    }
+
+    /// One paragraph property (`w:pPr` child) resolved onto the open
+    /// paragraph: the style, outline level, and numbering it names.
+    fn paragraph_property<R>(
+        &mut self,
+        reader: &NsReader<R>,
+        start: &BytesStart<'_>,
+    ) -> Result<(), DocxError> {
+        match start.local_name().as_ref() {
+            b"pStyle" => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.style = attribute(reader, start, b"val")?;
+                }
+            }
+            b"outlineLvl" => {
+                if let (Some(paragraph), Some(value)) =
+                    (self.paragraph.as_mut(), attribute(reader, start, b"val")?)
+                {
+                    paragraph.outline = Some(outline_level(&value)?);
+                }
+            }
+            b"numPr" => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.listed = true;
+                }
+            }
+            b"numId" => {
+                if let Some(paragraph) = self.paragraph.as_mut() {
+                    paragraph.num_id = attribute(reader, start, b"val")?;
+                }
+            }
+            b"ilvl" => {
+                if let (Some(paragraph), Some(level)) =
+                    (self.paragraph.as_mut(), attribute(reader, start, b"val")?)
+                {
+                    paragraph.level = list_level(&level)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// One run property (`w:rPr` child) resolved onto the open run: the
+    /// direct emphasis — bold, italic, strikethrough — the document names
+    /// on it.
+    fn run_property<R>(
+        &mut self,
+        reader: &NsReader<R>,
+        start: &BytesStart<'_>,
+    ) -> Result<(), DocxError> {
+        let Some(paragraph) = self.paragraph.as_mut() else {
+            return Ok(());
+        };
+        let applies = on_off(attribute(reader, start, b"val")?.as_deref())?;
+        match start.local_name().as_ref() {
+            b"b" => paragraph.run.bold = applies,
+            b"i" => paragraph.run.italic = applies,
+            b"strike" => paragraph.run.strike = applies,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// One visible run character Word encodes as an element rather than
+    /// text — a tab, a symbol, a hyphen: erasing them would project
+    /// distinct sentences identically.
+    fn run_character<R>(
+        &mut self,
+        reader: &NsReader<R>,
+        start: &BytesStart<'_>,
+    ) -> Result<(), DocxError> {
+        let Some(paragraph) = self.paragraph.as_mut() else {
+            return Ok(());
+        };
+        match start.local_name().as_ref() {
+            b"tab" => paragraph.append("\t"),
+            b"sym" => {
+                let value = attribute(reader, start, b"char")?.ok_or_else(|| {
+                    DocxError::Structure("sym without a char attribute".to_owned())
+                })?;
+                paragraph.append(&sym_char(&value)?.to_string());
+            }
+            b"noBreakHyphen" => paragraph.append("\u{2011}"),
+            b"softHyphen" => paragraph.append("\u{00ad}"),
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Route a finished paragraph: into the open table cell when a table is
     /// open, else into the body as its markdown block.
     ///
@@ -1219,30 +1282,7 @@ impl Document<'_> {
             .listing(paragraph)
             .map(|(num_id, level)| (num_id.map(str::to_owned), level));
         if let Some((Some(id), level)) = &listed {
-            // A parent item advancing — whatever its marker kind —
-            // restarts deeper ordered levels, each per its own
-            // `w:lvlRestart` policy.
-            let advancing = *level;
-            let doomed: Vec<(String, usize)> = self
-                .ordinals
-                .keys()
-                .filter(|(owner, deeper)| owner == id && *deeper > advancing)
-                .filter(|(_, deeper)| {
-                    match self.level_def(Some(id), *deeper).restart {
-                        // Default: any shallower advance restarts.
-                        None => true,
-                        // 0: this level never restarts.
-                        Some(0) => false,
-                        // N: only levels at or above the 1-based level N
-                        // restart it.
-                        Some(threshold) => advancing < threshold as usize,
-                    }
-                })
-                .cloned()
-                .collect();
-            for key in doomed {
-                self.ordinals.remove(&key);
-            }
+            self.restart_sublevels(id, *level);
         }
         let list_item = match listed {
             Some((Some(id), level)) => {
@@ -1296,6 +1336,32 @@ impl Document<'_> {
         self.push_into_cell(block)
     }
 
+    /// A parent item advancing at `advancing` — whatever its marker kind
+    /// — restarts deeper ordered levels of the same instance, each per
+    /// its own `w:lvlRestart` policy.
+    fn restart_sublevels(&mut self, id: &str, advancing: usize) {
+        let doomed: Vec<(String, usize)> = self
+            .ordinals
+            .keys()
+            .filter(|(owner, deeper)| owner.as_str() == id && *deeper > advancing)
+            .filter(|(_, deeper)| {
+                match self.level_def(Some(id), *deeper).restart {
+                    // Default: any shallower advance restarts.
+                    None => true,
+                    // 0: this level never restarts.
+                    Some(0) => false,
+                    // N: only levels at or above the 1-based level N
+                    // restart it.
+                    Some(threshold) => advancing < threshold as usize,
+                }
+            })
+            .cloned()
+            .collect();
+        for key in doomed {
+            self.ordinals.remove(&key);
+        }
+    }
+
     /// The indentation a list item at `level` renders with: its own
     /// numbering instance's parent marker content column, so `CommonMark`
     /// keeps the hierarchy under markers of any width ("10. " needs four
@@ -1341,7 +1407,7 @@ impl Document<'_> {
     /// other style resolves through the styles part's outline levels.
     fn heading(&self, paragraph: &Paragraph) -> Option<usize> {
         if let Some(outline) = paragraph.outline {
-            return (outline != OUTLINE_BODY_TEXT).then(|| (outline + 1).min(MAX_HEADING_LEVEL));
+            return (outline != OUTLINE_BODY_TEXT).then(|| (outline + 1).min(HEADING_LEVEL_MAX));
         }
         let style = paragraph.style.as_deref().or(self.default_style)?;
         if let Some(level) = heading_level(style) {
@@ -1350,7 +1416,7 @@ impl Document<'_> {
         self.styles
             .get(style)?
             .outline
-            .map(|outline| (outline + 1).min(MAX_HEADING_LEVEL))
+            .map(|outline| (outline + 1).min(HEADING_LEVEL_MAX))
     }
 
     /// The list a paragraph belongs to in the accepted body: its direct
@@ -1402,6 +1468,18 @@ impl Document<'_> {
         }
     }
 
+    /// The row open right now: the last row of the innermost open table.
+    fn open_row(&mut self) -> Option<&mut Row> {
+        self.tables
+            .last_mut()
+            .and_then(|table| table.rows.last_mut())
+    }
+
+    /// The cell open right now: the last cell of the open row.
+    fn open_cell(&mut self) -> Option<&mut Cell> {
+        self.open_row().and_then(|row| row.cells.last_mut())
+    }
+
     /// A finished block lands in the body, or into the open cell when it
     /// closed inside another table.
     fn push_block(&mut self, block: String) -> Result<(), DocxError> {
@@ -1413,14 +1491,9 @@ impl Document<'_> {
     }
 
     fn push_into_cell(&mut self, content: String) -> Result<(), DocxError> {
-        let cell = self
-            .tables
-            .last_mut()
-            .and_then(|table| table.rows.last_mut())
-            .and_then(|row| row.cells.last_mut())
-            .ok_or_else(|| {
-                DocxError::Structure("paragraph inside a table but outside a cell".to_owned())
-            })?;
+        let cell = self.open_cell().ok_or_else(|| {
+            DocxError::Structure("paragraph inside a table but outside a cell".to_owned())
+        })?;
         cell.paragraphs.push(content);
         Ok(())
     }
@@ -1576,7 +1649,7 @@ fn heading_level(style: &str) -> Option<usize> {
     if !(1..=9).contains(&level) {
         return None;
     }
-    Some(level.min(MAX_HEADING_LEVEL))
+    Some(level.min(HEADING_LEVEL_MAX))
 }
 
 /// A `w:outlineLvl` value: 0..=8 name outline levels, 9 names body text;
@@ -1599,7 +1672,7 @@ fn list_level(value: &str) -> Result<usize, DocxError> {
     let level: usize = value
         .parse()
         .map_err(|_| DocxError::Structure(format!("list level {value:?} is not a number")))?;
-    if level > MAX_LIST_LEVEL {
+    if level > LIST_LEVEL_MAX {
         return Err(DocxError::Structure(format!(
             "list level {level} is out of range"
         )));
@@ -1616,116 +1689,123 @@ struct StyleDef {
     ilvl: usize,
 }
 
-/// What each paragraph style contributes, `basedOn` chains followed:
-/// outline levels for headings, and `numPr` numbering for lists applied
-/// through styles. Historical `*Change` records inside style definitions
-/// are excluded, as in the document walk.
-fn resolved_styles(
-    xml: &str,
-) -> Result<(BTreeMap<String, ResolvedStyle>, Option<String>), DocxError> {
-    let mut reader = NsReader::from_str(xml);
-    let mut frame = PartFrame::new("styles", b"styles");
-    let mut styles: BTreeMap<String, StyleDef> = BTreeMap::new();
-    let mut current: Option<(String, StyleDef)> = None;
-    let mut default_style: Option<String> = None;
-    let mut skipping: usize = 0;
-    // Choice branches carry extension content this projector does not
-    // support; only the Fallback branch contributes (as in the document
-    // walk).
-    let mut choice_at: Option<usize> = None;
+/// What an auxiliary-part walk feeds: `WordprocessingML` element opens
+/// and closes, already outside `mc:Choice` branches and
+/// [`SKIPPED_SUBTREES`] subtrees, with every well-formedness rule run.
+/// Auxiliary parts carry no projected text, so unlike [`BodySink`] there
+/// is no text hook — character data is validated and dropped.
+trait AuxiliarySink {
+    fn open<R>(&mut self, reader: &NsReader<R>, start: &BytesStart<'_>) -> Result<(), DocxError>;
+    fn close(&mut self, local_name: &[u8]);
+}
 
+/// Depth inside a [`SKIPPED_SUBTREES`] subtree during an auxiliary-part
+/// walk; nothing reaches the sink while inside one. The document walk
+/// keeps its own counter in the sink instead, because `w:del` marks
+/// state there before its subtree is skipped.
+#[derive(Default)]
+struct Skip(usize);
+
+impl Skip {
+    /// Whether `local_name`'s open is skipped: everything inside an open
+    /// window is — deepening it — and a [`SKIPPED_SUBTREES`] container
+    /// opens one.
+    fn start(&mut self, local_name: &[u8]) -> bool {
+        if self.0 > 0 {
+            self.0 += 1;
+            return true;
+        }
+        if SKIPPED_SUBTREES.contains(&local_name) {
+            self.0 = 1;
+            return true;
+        }
+        false
+    }
+
+    /// Whether a self-closing element is skipped: inside an open window
+    /// or itself a [`SKIPPED_SUBTREES`] element. Neither moves the depth.
+    fn empty(&self, local_name: &[u8]) -> bool {
+        self.0 > 0 || SKIPPED_SUBTREES.contains(&local_name)
+    }
+
+    /// Whether an element close is skipped, retreating out of the window.
+    fn end(&mut self) -> bool {
+        if self.0 > 0 {
+            self.0 -= 1;
+            return true;
+        }
+        false
+    }
+}
+
+/// One pass over an auxiliary part (styles or numbering) in document
+/// order, feeding `sink` the element opens and closes that survive
+/// masking and skipping.
+fn walk_auxiliary<S: AuxiliarySink>(
+    xml: &str,
+    mut frame: PartFrame,
+    sink: &mut S,
+) -> Result<(), DocxError> {
+    let mut reader = NsReader::from_str(xml);
+    let mut mask = Mask::auxiliary();
+    let mut skip = Skip::default();
     loop {
         match reader.read_resolved_event()? {
             (resolve, Event::Start(start)) => {
                 frame.start()?;
                 let resolve = checked(resolve)?;
                 let wordprocessingml = in_wordprocessingml(&resolve);
-                if choice_at.is_none()
-                    && in_markup_compatibility(&resolve)
-                    && start.local_name().as_ref() == b"Choice"
-                {
-                    choice_at = Some(frame.depth);
-                }
+                mask.open(&resolve, start.local_name().as_ref(), frame.depth);
                 resolved_attributes(&reader, &start)?;
-                if !wordprocessingml || choice_at.is_some() {
+                if !wordprocessingml || mask.active() {
                     continue;
                 }
-                if skipping > 0 {
-                    skipping += 1;
+                if skip.start(start.local_name().as_ref()) {
                     continue;
                 }
-                if SKIPPED_SUBTREES.contains(&start.local_name().as_ref()) {
-                    skipping = 1;
-                    continue;
-                }
-                style_element(&reader, &start, &mut current, &mut default_style)?;
+                sink.open(&reader, &start)?;
             }
             (resolve, Event::Empty(start)) => {
                 let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
                 frame.empty(wordprocessingml, start.local_name().as_ref())?;
                 resolved_attributes(&reader, &start)?;
-                if !wordprocessingml || skipping > 0 || choice_at.is_some() {
+                if !wordprocessingml || mask.active() || skip.empty(start.local_name().as_ref()) {
                     continue;
                 }
-                if SKIPPED_SUBTREES.contains(&start.local_name().as_ref()) {
-                    continue;
-                }
-                style_element(&reader, &start, &mut current, &mut default_style)?;
+                sink.open(&reader, &start)?;
             }
             (resolve, Event::End(end)) => {
                 let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
                 frame.end(wordprocessingml, end.local_name().as_ref())?;
-                if let Some(depth) = choice_at {
-                    if frame.depth < depth {
-                        choice_at = None;
-                    }
+                if mask.ends(frame.depth) {
                     continue;
                 }
                 if !wordprocessingml {
                     continue;
                 }
-                if skipping > 0 {
-                    skipping -= 1;
+                if skip.end() {
                     continue;
                 }
-                if end.local_name().as_ref() == b"style"
-                    && let Some((id, def)) = current.take()
-                {
-                    styles.insert(id, def);
-                }
+                sink.close(end.local_name().as_ref());
             }
             (_, Event::Text(text)) => {
-                let content = text.xml10_content().map_err(quick_xml::Error::from)?;
-                ensure_xml_chars(&content)?;
+                let content = character_data(&text)?;
                 frame.characters(xml_whitespace_only(&content))?;
             }
             (_, Event::CData(data)) => {
-                let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&data, "CDATA")?;
                 frame.characters(false)?;
             }
             (_, Event::GeneralRef(reference)) => {
-                ensure_xml_chars(&resolve_reference(&reference)?)?;
+                resolve_reference(&reference)?;
                 frame.characters(false)?;
             }
-            (_, Event::Decl(_) | Event::DocType(_)) => {
-                frame.prolog_declaration()?;
-            }
+            (_, Event::Decl(_) | Event::DocType(_)) => frame.prolog_declaration()?,
             (_, Event::Comment(text)) => {
-                let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&text, "comment")?;
             }
             (_, Event::PI(instruction)) => {
-                let content = std::str::from_utf8(&instruction).map_err(|_| {
-                    DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_owned(),
-                    )
-                })?;
-                ensure_xml_chars(content)?;
+                utf8_content(&instruction, "processing-instruction")?;
             }
             (_, Event::Eof) => {
                 frame.eof()?;
@@ -1733,8 +1813,20 @@ fn resolved_styles(
             }
         }
     }
+    Ok(())
+}
 
-    let chains = resolved_chains(&styles)?;
+/// What each paragraph style contributes, `basedOn` chains followed:
+/// outline levels for headings, and `numPr` numbering for lists applied
+/// through styles. Historical `*Change` records inside style definitions
+/// are excluded, as in the document walk.
+fn resolved_styles(
+    xml: &str,
+) -> Result<(BTreeMap<String, ResolvedStyle>, Option<String>), DocxError> {
+    let mut walk = StylesWalk::default();
+    walk_auxiliary(xml, PartFrame::new("styles", b"styles"), &mut walk)?;
+
+    let chains = resolved_chains(&walk.styles)?;
     let mut resolved = BTreeMap::new();
     for (id, chain) in chains {
         let outline = chain.outline.filter(|level| *level != OUTLINE_BODY_TEXT);
@@ -1748,7 +1840,7 @@ fn resolved_styles(
             );
         }
     }
-    Ok((resolved, default_style))
+    Ok((resolved, walk.default_style))
 }
 
 /// What a style's `basedOn` chain accumulates: the nearest definition of
@@ -1815,13 +1907,37 @@ fn resolved_chains(
     Ok(memo)
 }
 
+/// The styles walk's state while the part streams by: collected
+/// definitions, the definition open right now, and the default paragraph
+/// style.
+#[derive(Default)]
+struct StylesWalk {
+    styles: BTreeMap<String, StyleDef>,
+    current: Option<(String, StyleDef)>,
+    default_style: Option<String>,
+}
+
+impl AuxiliarySink for StylesWalk {
+    fn open<R>(&mut self, reader: &NsReader<R>, start: &BytesStart<'_>) -> Result<(), DocxError> {
+        style_element(reader, start, self)
+    }
+
+    /// A closing `w:style` completes the open definition.
+    fn close(&mut self, local_name: &[u8]) {
+        if local_name == b"style"
+            && let Some((id, def)) = self.current.take()
+        {
+            self.styles.insert(id, def);
+        }
+    }
+}
+
 /// One element inside a style definition: the properties a style
 /// contributes to paragraphs that name it.
 fn style_element<R>(
     reader: &NsReader<R>,
     start: &BytesStart<'_>,
-    current: &mut Option<(String, StyleDef)>,
-    default_style: &mut Option<String>,
+    walk: &mut StylesWalk,
 ) -> Result<(), DocxError> {
     match start.local_name().as_ref() {
         b"style" => {
@@ -1830,13 +1946,13 @@ fn style_element<R>(
                 // name no style at all, as Word applies it.
                 let kind = attribute(reader, start, b"type")?;
                 let default = attribute(reader, start, b"default")?;
-                if default_style.is_none()
+                if walk.default_style.is_none()
                     && kind.as_deref() == Some("paragraph")
                     && matches!(default.as_deref(), Some("1" | "true" | "on"))
                 {
-                    *default_style = Some(id.clone());
+                    walk.default_style = Some(id.clone());
                 }
-                *current = Some((
+                walk.current = Some((
                     id,
                     StyleDef {
                         based_on: None,
@@ -1848,25 +1964,25 @@ fn style_element<R>(
             }
         }
         b"basedOn" => {
-            if let Some((_, def)) = current.as_mut() {
+            if let Some((_, def)) = walk.current.as_mut() {
                 def.based_on = attribute(reader, start, b"val")?;
             }
         }
         b"outlineLvl" => {
             if let (Some((_, def)), Some(value)) =
-                (current.as_mut(), attribute(reader, start, b"val")?)
+                (walk.current.as_mut(), attribute(reader, start, b"val")?)
             {
                 def.outline = Some(outline_level(&value)?);
             }
         }
         b"numId" => {
-            if let Some((_, def)) = current.as_mut() {
+            if let Some((_, def)) = walk.current.as_mut() {
                 def.num_id = attribute(reader, start, b"val")?;
             }
         }
         b"ilvl" => {
             if let (Some((_, def)), Some(value)) =
-                (current.as_mut(), attribute(reader, start, b"val")?)
+                (walk.current.as_mut(), attribute(reader, start, b"val")?)
             {
                 def.ilvl = list_level(&value)?;
             }
@@ -1933,121 +2049,31 @@ impl NumberingWalk {
     }
 }
 
+impl AuxiliarySink for NumberingWalk {
+    fn open<R>(&mut self, reader: &NsReader<R>, start: &BytesStart<'_>) -> Result<(), DocxError> {
+        numbering_element(reader, start, self)
+    }
+
+    /// A closing container leaves its context: its levels stop receiving
+    /// fields.
+    fn close(&mut self, local_name: &[u8]) {
+        match local_name {
+            b"abstractNum" => self.current_abstract = None,
+            b"lvl" => self.current_level = None,
+            b"lvlOverride" => self.current_override = None,
+            b"num" => self.current_num = None,
+            _ => {}
+        }
+    }
+}
+
 /// The numbering part: numId → (list level → kind) with the `w:num` →
 /// `w:abstractNum` indirection resolved, plus the paragraph styles that
 /// levels associate to. Level overrides (`w:lvlOverride`) are not applied
 /// in v1.
 fn numbering_part(xml: &str) -> Result<NumberingPart, DocxError> {
-    let mut reader = NsReader::from_str(xml);
-    let mut frame = PartFrame::new("numbering", b"numbering");
     let mut walk = NumberingWalk::default();
-    let mut skipping: usize = 0;
-    // Choice branches carry extension content this projector does not
-    // support; only the Fallback branch contributes (as in the document
-    // walk).
-    let mut choice_at: Option<usize> = None;
-
-    loop {
-        match reader.read_resolved_event()? {
-            (resolve, Event::Start(start)) => {
-                frame.start()?;
-                let resolve = checked(resolve)?;
-                let wordprocessingml = in_wordprocessingml(&resolve);
-                if choice_at.is_none()
-                    && in_markup_compatibility(&resolve)
-                    && start.local_name().as_ref() == b"Choice"
-                {
-                    choice_at = Some(frame.depth);
-                }
-                resolved_attributes(&reader, &start)?;
-                if !wordprocessingml || choice_at.is_some() {
-                    continue;
-                }
-                if skipping > 0 {
-                    skipping += 1;
-                    continue;
-                }
-                if SKIPPED_SUBTREES.contains(&start.local_name().as_ref()) {
-                    skipping = 1;
-                    continue;
-                }
-                numbering_element(&reader, &start, &mut walk)?;
-            }
-            (resolve, Event::Empty(start)) => {
-                let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
-                frame.empty(wordprocessingml, start.local_name().as_ref())?;
-                resolved_attributes(&reader, &start)?;
-                if !wordprocessingml || skipping > 0 || choice_at.is_some() {
-                    continue;
-                }
-                if SKIPPED_SUBTREES.contains(&start.local_name().as_ref()) {
-                    continue;
-                }
-                numbering_element(&reader, &start, &mut walk)?;
-            }
-            (resolve, Event::End(end)) => {
-                let wordprocessingml = in_wordprocessingml(&checked(resolve)?);
-                frame.end(wordprocessingml, end.local_name().as_ref())?;
-                if let Some(depth) = choice_at {
-                    if frame.depth < depth {
-                        choice_at = None;
-                    }
-                    continue;
-                }
-                if !wordprocessingml {
-                    continue;
-                }
-                if skipping > 0 {
-                    skipping -= 1;
-                    continue;
-                }
-                match end.local_name().as_ref() {
-                    b"abstractNum" => walk.current_abstract = None,
-                    b"lvl" => walk.current_level = None,
-                    b"lvlOverride" => walk.current_override = None,
-                    b"num" => walk.current_num = None,
-                    _ => {}
-                }
-            }
-            (_, Event::Text(text)) => {
-                let content = text.xml10_content().map_err(quick_xml::Error::from)?;
-                ensure_xml_chars(&content)?;
-                frame.characters(xml_whitespace_only(&content))?;
-            }
-            (_, Event::CData(data)) => {
-                let content = std::str::from_utf8(&data).map_err(|_| {
-                    DocxError::Structure("CDATA content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
-                frame.characters(false)?;
-            }
-            (_, Event::GeneralRef(reference)) => {
-                ensure_xml_chars(&resolve_reference(&reference)?)?;
-                frame.characters(false)?;
-            }
-            (_, Event::Decl(_) | Event::DocType(_)) => {
-                frame.prolog_declaration()?;
-            }
-            (_, Event::Comment(text)) => {
-                let content = std::str::from_utf8(&text).map_err(|_| {
-                    DocxError::Structure("comment content is not valid UTF-8".to_owned())
-                })?;
-                ensure_xml_chars(content)?;
-            }
-            (_, Event::PI(instruction)) => {
-                let content = std::str::from_utf8(&instruction).map_err(|_| {
-                    DocxError::Structure(
-                        "processing-instruction content is not valid UTF-8".to_owned(),
-                    )
-                })?;
-                ensure_xml_chars(content)?;
-            }
-            (_, Event::Eof) => {
-                frame.eof()?;
-                break;
-            }
-        }
-    }
+    walk_auxiliary(xml, PartFrame::new("numbering", b"numbering"), &mut walk)?;
 
     let empty = BTreeMap::new();
     let mut kinds = Numbering::new();
@@ -2117,30 +2143,13 @@ fn numbering_element<R>(
         b"abstractNum" => {
             walk.current_abstract = attribute(reader, start, b"abstractNumId")?;
         }
-        b"lvl" => {
-            walk.current_level = match attribute(reader, start, b"ilvl")? {
-                Some(value) => Some(list_level(&value)?),
-                None => None,
-            };
-        }
-        b"lvlOverride" => {
-            walk.current_override = match attribute(reader, start, b"ilvl")? {
-                Some(value) => Some(list_level(&value)?),
-                None => None,
-            };
-        }
+        b"lvl" => walk.current_level = declared_level(reader, start)?,
+        b"lvlOverride" => walk.current_override = declared_level(reader, start)?,
         b"numFmt" => {
-            if let Some(format) = attribute(reader, start, b"val")? {
-                let kind = match format.as_str() {
-                    "bullet" => ListKind::Bullet,
-                    // Word renders a `none` level without a marker; the
-                    // projection must not invent one.
-                    "none" => ListKind::Unmarked,
-                    _ => ListKind::Ordered,
-                };
-                if let Some(slot) = walk.level_slot() {
-                    slot.kind = Some(kind);
-                }
+            if let Some(format) = attribute(reader, start, b"val")?
+                && let Some(slot) = walk.level_slot()
+            {
+                slot.kind = Some(list_kind(&format));
             }
         }
         b"start" => {
@@ -2197,6 +2206,29 @@ fn numbering_element<R>(
     Ok(())
 }
 
+/// The marker kind an `ST_NumberFormat` value names: `bullet` bullets,
+/// `none` marks nothing — Word renders such levels without a marker and
+/// the projection must not invent one — and every other format numbers.
+fn list_kind(format: &str) -> ListKind {
+    match format {
+        "bullet" => ListKind::Bullet,
+        "none" => ListKind::Unmarked,
+        _ => ListKind::Ordered,
+    }
+}
+
+/// The level a `w:lvl` or `w:lvlOverride` names (`w:ilvl`), bounded to
+/// Word's 0..=8; an absent attribute names none.
+fn declared_level<R>(
+    reader: &NsReader<R>,
+    start: &BytesStart<'_>,
+) -> Result<Option<usize>, DocxError> {
+    match attribute(reader, start, b"ilvl")? {
+        Some(value) => Ok(Some(list_level(&value)?)),
+        None => Ok(None),
+    }
+}
+
 /// A table as markdown rows, with the separator markdown requires after the
 /// first row. Rows a pending revision deletes are not part of the accepted
 /// body; a table with nothing left renders nothing.
@@ -2240,19 +2272,25 @@ fn encoded_cell(cell: &Cell) -> String {
 }
 
 /// The replacement text of `&name;` and `&#N;` references: character
-/// references and the five predefined XML entities. A docx declares no
-/// other entities, so anything else is malformed rather than droppable.
+/// references and the five predefined XML entities, the replacement
+/// checked against the XML character set. A docx declares no other
+/// entities, so anything else is malformed rather than droppable.
 fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, DocxError> {
-    if let Some(resolved) = reference.resolve_char_ref()? {
-        return Ok(resolved.to_string());
-    }
-    let name = reference.xml10_content().map_err(quick_xml::Error::from)?;
-    match resolve_xml_entity(&name) {
-        Some(replacement) => Ok(replacement.to_owned()),
-        None => Err(DocxError::Structure(format!(
-            "unresolvable entity reference &{name};"
-        ))),
-    }
+    let replacement = if let Some(resolved) = reference.resolve_char_ref()? {
+        resolved.to_string()
+    } else {
+        let name = reference.xml10_content().map_err(quick_xml::Error::from)?;
+        match resolve_xml_entity(&name) {
+            Some(replacement) => replacement.to_owned(),
+            None => {
+                return Err(DocxError::Structure(format!(
+                    "unresolvable entity reference &{name};"
+                )));
+            }
+        }
+    };
+    ensure_xml_chars(&replacement)?;
+    Ok(replacement)
 }
 
 /// The value of the `name` attribute on `start`, matched by local name for

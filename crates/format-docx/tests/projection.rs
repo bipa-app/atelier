@@ -1,3 +1,7 @@
+//! The docx projector against hand-built packages: body, headings,
+//! lists, tables, emphasis, masking — every projection pinned exactly,
+//! every malformed input refused by name.
+
 use std::io::{Cursor, Write};
 
 use atelier_diff_core::{Confidence, FormatPackage, LineKind, diff_lines};

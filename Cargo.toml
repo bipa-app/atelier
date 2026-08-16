@@ -72,5 +72,5 @@ missing_panics_doc = { level = "allow", priority = 3 }
 result_large_err = { level = "allow", priority = 3 }
 struct_excessive_bools = { level = "allow", priority = 3 }
 too_many_arguments = {  level = "allow", priority = 3 }
-too_many_lines = { level = "allow", priority = 3 }
+too_many_lines = { level = "warn", priority = 3 }
 unreadable_literal = { level = "allow", priority = 3 }
