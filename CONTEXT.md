@@ -11,8 +11,12 @@ A named, versioned body of work content with its own history, journal, profile, 
 _Avoid_: project, repo, folder (those are sources), environment
 
 **Source**:
-An external origin a workspace is attached to: a git repository (remote or local) or a folder (local or remote). A workspace can outlive, diverge from, and re-sync with its source.
-_Avoid_: origin, upstream, mount
+An external origin a workspace is attached to: a git repository (remote or local) or a folder (local or remote). Each source keeps its own history at its mount; a workspace can outlive, diverge from, and re-sync with any of its sources.
+_Avoid_: origin, upstream, project, repo
+
+**Mount**:
+The subdirectory where an attached source lives inside its workspace — the prefix its addresses carry and the boundary between its history and its neighbors'. The workspace root is source zero.
+_Avoid_: folder, subdir, prefix
 
 **Sync Policy**:
 The rule for how content moves between a workspace and its source: import once, pull-only mirror, or two-way.
@@ -23,7 +27,7 @@ The set of paths a workspace versions. An ignored path is outside the workspace,
 _Avoid_: ignore list, exclusions
 
 **Snapshot**:
-One immutable whole-workspace state in history, attributed to an actor.
+One immutable whole-source state in its history, attributed to an actor.
 _Avoid_: version, revision, save
 
 **Profile**:
