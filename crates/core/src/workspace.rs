@@ -297,6 +297,100 @@ impl Workspace {
         Ok(Diff { deltas })
     }
 
+    /// Render the read model an actor consumes first: identity, sources,
+    /// discipline, live state, and the loop this workspace expects. Every
+    /// face returns this text verbatim (ADR-0006: one render, three faces).
+    pub fn manifest(&mut self) -> Result<String, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        let config = read_workspace_config(&self.root.join(CONTROL_DIR))?;
+        let mut lines = vec![
+            format!("workspace: {}", config.workspace.name),
+            format!("schema: {}", config.schema),
+            String::new(),
+            "sources:".to_owned(),
+        ];
+        if config.sources.is_empty() {
+            lines.push("  (none)".to_owned());
+        }
+        for source in &config.sources {
+            lines.push(format!(
+                "  {}  {}  {}  {}",
+                source.mount,
+                source.kind,
+                source.path.display(),
+                source.sync
+            ));
+        }
+        lines.push(String::new());
+        lines.push("discipline:".to_owned());
+        let landing = config.landing;
+        let self_approve = if landing.allow_self_approve {
+            "allowed"
+        } else {
+            "forbidden"
+        };
+        let dismiss = if landing.dismiss_approvals_on_new_snapshots {
+            "yes"
+        } else {
+            "no"
+        };
+        lines.push(format!(
+            "  approvals: {}  self-approval: {self_approve}  snapshots dismiss approvals: {dismiss}",
+            landing.approvals
+        ));
+        let fidelity = match config.journal.instruction_fidelity {
+            InstructionFidelity::Summary => "summary",
+            InstructionFidelity::Verbatim => "verbatim",
+        };
+        lines.push(format!("  instructions: {fidelity}"));
+        lines.push(String::new());
+        lines.push("state:".to_owned());
+        lines.push(format!("  head: {}", self.engine.head()?));
+        for mount in &self.mounts {
+            lines.push(format!("  head {}: {}", mount.name, mount.engine.head()?));
+        }
+        let mut open_sessions: Vec<String> = self
+            .sessions()?
+            .into_iter()
+            .filter(|session| match session.state {
+                SessionState::Open => true,
+                SessionState::Landed | SessionState::Abandoned => false,
+            })
+            .map(|session| session.id.to_string())
+            .collect();
+        open_sessions.reverse();
+        lines.push(if open_sessions.is_empty() {
+            "  open sessions: none".to_owned()
+        } else {
+            format!("  open sessions: {}", open_sessions.join(", "))
+        });
+        let mut live_requests: Vec<String> = self
+            .landing_requests()?
+            .into_iter()
+            .filter(|request| match request.state {
+                RequestState::Open | RequestState::Approved | RequestState::Parked => true,
+                RequestState::Landed | RequestState::Rejected | RequestState::Abandoned => false,
+            })
+            .map(|request| format!("{} ({})", request.id, request.state))
+            .collect();
+        live_requests.reverse();
+        lines.push(if live_requests.is_empty() {
+            "  live requests: none".to_owned()
+        } else {
+            format!("  live requests: {}", live_requests.join(", "))
+        });
+        lines.push(String::new());
+        lines.push("the loop:".to_owned());
+        lines
+            .push("  open_session -> write -> diff -> land (or request_land + approve)".to_owned());
+        lines.push(
+            "  mount-scoped paths address sources; editing never takes the landing lease"
+                .to_owned(),
+        );
+        Ok(lines.join("\n"))
+    }
+
     /// Diff two of the root line's snapshots by id: `before` against
     /// `after`, each delta raised to the highest rung the ladder allows.
     /// Mounted lines' snapshot pairs arrive with the session fan-out.

@@ -114,6 +114,7 @@ pub(crate) fn dispatch(
     args: &Value,
 ) -> Result<Value, ToolFailure> {
     match tool {
+        "manifest" => Ok(json!({"manifest": workspace.manifest()?})),
         "open_session" => {
             let actor = Actor {
                 name: required_str(args, "actor_name")?.to_owned(),
@@ -350,6 +351,11 @@ fn error_response(id: &Value, code: i64, message: &str) -> String {
 /// journal — never the engine's vocabulary.
 fn tool_definitions() -> Value {
     json!([
+        {
+            "name": "manifest",
+            "description": "Read this first: what this workspace is - its sources and mounts, its landing discipline, its live state, and the loop it expects you to follow.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
         {
             "name": "open_session",
             "description": "Open a session: your own working copy of the workspace and your own change. Edit files under working_copy (or with write), then diff and request_land.",
