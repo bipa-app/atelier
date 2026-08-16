@@ -107,14 +107,19 @@ fn actor_config_path() -> Option<PathBuf> {
 }
 
 /// An external origin the workspace is attached to, as held in memory and as
-/// persisted under `[[source]]` in `.atelier/config.toml`.
+/// persisted under `[[source]]` in `.atelier/config.toml`. The mount names
+/// the subdirectory whose engine carries the source's history; `/` is the
+/// v1 root import — content folded into source zero, no engine of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub kind: SourceKind,
     pub path: PathBuf,
     pub sync: SyncPolicy,
-    pub mount: PathBuf,
+    pub mount: String,
 }
+
+/// The mount value of a v1 root import.
+pub(crate) const ROOT_MOUNT: &str = "/";
 
 /// The kind of origin a source is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
