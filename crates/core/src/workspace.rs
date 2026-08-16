@@ -397,9 +397,34 @@ impl Workspace {
         lines.push(format!("  instructions: {fidelity}"));
         lines.push(String::new());
         lines.push("state:".to_owned());
-        lines.push(format!("  head: {}", self.engine.head()?));
+        for line in self.state_lines()? {
+            lines.push(format!("  {line}"));
+        }
+        lines.push(String::new());
+        lines.push("the loop:".to_owned());
+        lines
+            .push("  open_session -> write -> diff -> land (or request_land + approve)".to_owned());
+        lines.push(
+            "  mount-scoped paths address sources; editing never takes the landing lease"
+                .to_owned(),
+        );
+        Ok(lines.join("\n"))
+    }
+
+    /// The live-state read model: what the manifest's state section says,
+    /// standing alone. Every face returns this text verbatim (ADR-0006).
+    pub fn status(&mut self) -> Result<String, Error> {
+        self.refresh_engines()?;
+        self.auto_snapshot()?;
+        Ok(self.state_lines()?.join("\n"))
+    }
+
+    /// The live state every read model shares: per-source heads, open
+    /// sessions, live requests.
+    fn state_lines(&mut self) -> Result<Vec<String>, Error> {
+        let mut lines = vec![format!("head: {}", self.engine.head()?)];
         for mount in &self.mounts {
-            lines.push(format!("  head {}: {}", mount.name, mount.engine.head()?));
+            lines.push(format!("head {}: {}", mount.name, mount.engine.head()?));
         }
         let mut open_sessions: Vec<String> = self
             .sessions()?
@@ -412,9 +437,9 @@ impl Workspace {
             .collect();
         open_sessions.reverse();
         lines.push(if open_sessions.is_empty() {
-            "  open sessions: none".to_owned()
+            "open sessions: none".to_owned()
         } else {
-            format!("  open sessions: {}", open_sessions.join(", "))
+            format!("open sessions: {}", open_sessions.join(", "))
         });
         let mut live_requests: Vec<String> = self
             .landing_requests()?
@@ -427,19 +452,11 @@ impl Workspace {
             .collect();
         live_requests.reverse();
         lines.push(if live_requests.is_empty() {
-            "  live requests: none".to_owned()
+            "live requests: none".to_owned()
         } else {
-            format!("  live requests: {}", live_requests.join(", "))
+            format!("live requests: {}", live_requests.join(", "))
         });
-        lines.push(String::new());
-        lines.push("the loop:".to_owned());
-        lines
-            .push("  open_session -> write -> diff -> land (or request_land + approve)".to_owned());
-        lines.push(
-            "  mount-scoped paths address sources; editing never takes the landing lease"
-                .to_owned(),
-        );
-        Ok(lines.join("\n"))
+        Ok(lines)
     }
 
     /// Diff two of the root line's snapshots by id: `before` against
