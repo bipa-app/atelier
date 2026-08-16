@@ -34,6 +34,8 @@ enum Command {
     /// Show what this workspace is: sources, discipline, live state, and
     /// the loop it expects. The first thing an actor reads.
     Manifest,
+    /// Show the live state: per-source heads, open sessions, live requests.
+    Status,
     /// Show the changes between the two latest snapshots.
     Diff,
     /// Show recent workspace acts.
@@ -108,6 +110,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Init { path } => init(path),
         Command::Attach { folder, mount } => attach(&folder, mount.as_deref()),
         Command::Manifest => manifest(),
+        Command::Status => status(),
         Command::Diff => diff(),
         Command::Journal => journal(),
         Command::History { source } => history(source.as_deref()),
@@ -169,6 +172,12 @@ fn manifest() -> Result<Vec<String>> {
     let mut workspace = open_current()?;
     let manifest = workspace.manifest()?;
     Ok(manifest.lines().map(str::to_owned).collect())
+}
+
+fn status() -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let status = workspace.status()?;
+    Ok(status.lines().map(str::to_owned).collect())
 }
 
 fn diff() -> Result<Vec<String>> {

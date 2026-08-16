@@ -169,6 +169,7 @@ fn an_mcp_client_runs_the_session_loop_end_to_end() {
         names,
         [
             "manifest",
+            "status",
             "open_session",
             "read",
             "write",
@@ -610,5 +611,31 @@ fn the_manifest_reads_the_same_over_mcp_and_the_cli() {
     assert!(
         over_mcp.contains("the loop:"),
         "the manifest orients an actor: {over_mcp}"
+    );
+}
+
+#[test]
+fn the_status_reads_the_same_over_mcp_and_the_cli() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create temp workspace");
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut client = McpClient::start(config_home.path(), workspace.path(), &[]);
+    let payload = client.call("status", &json!({}));
+    let over_mcp = payload["status"].as_str().expect("status is text");
+
+    let printed = ws(config_home.path(), workspace.path())
+        .arg("status")
+        .assert()
+        .success();
+    // One render, three faces: the CLI prints the identical text.
+    assert_eq!(stdout_lines(&printed).join("\n"), over_mcp);
+    assert!(
+        over_mcp.starts_with("head: ") && over_mcp.contains("open sessions: none"),
+        "the status names the live state: {over_mcp}"
     );
 }

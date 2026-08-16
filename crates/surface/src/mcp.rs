@@ -115,6 +115,7 @@ pub(crate) fn dispatch(
 ) -> Result<Value, ToolFailure> {
     match tool {
         "manifest" => Ok(json!({"manifest": workspace.manifest()?})),
+        "status" => Ok(json!({"status": workspace.status()?})),
         "open_session" => {
             let actor = Actor {
                 name: required_str(args, "actor_name")?.to_owned(),
@@ -354,6 +355,11 @@ fn tool_definitions() -> Value {
         {
             "name": "manifest",
             "description": "Read this first: what this workspace is - its sources and mounts, its landing discipline, its live state, and the loop it expects you to follow.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "status",
+            "description": "The live state: per-source heads, open sessions, live requests.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
