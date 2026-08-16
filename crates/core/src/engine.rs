@@ -87,11 +87,15 @@ pub(crate) struct Engine {
     ws: JjWorkspace,
     repo: Arc<ReadonlyRepo>,
     _settings: UserSettings,
+    /// Mount names outside this engine's world: never snapshotted as its
+    /// content, however they appear (ADR-0009).
+    boundary: Vec<String>,
 }
 
 impl Engine {
-    /// Create a colocated-git workspace store rooted at `root`.
-    pub fn init(root: &Path, actor: &Actor) -> Result<Self, Error> {
+    /// Create a colocated-git workspace store rooted at `root`; paths under
+    /// the `boundary` names are outside this engine's world.
+    pub fn init(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
         let settings = build_settings(actor)?;
         let (ws, repo) = block_on(JjWorkspace::init_colocated_git(
             &settings,
@@ -103,11 +107,12 @@ impl Engine {
             ws,
             repo,
             _settings: settings,
+            boundary: boundary.to_vec(),
         })
     }
 
     /// Load the workspace store already present at `root`.
-    pub fn open(root: &Path, actor: &Actor) -> Result<Self, Error> {
+    pub fn open(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
         let settings = build_settings(actor)?;
         let ws = JjWorkspace::load(
             &settings,
@@ -121,6 +126,7 @@ impl Engine {
             ws,
             repo,
             _settings: settings,
+            boundary: boundary.to_vec(),
         })
     }
 
@@ -150,7 +156,7 @@ impl Engine {
             Some(id) => id.clone(),
             None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
-        let base_ignores = base_ignores()?;
+        let base_ignores = base_ignores(&self.boundary)?;
         let options = SnapshotOptions {
             base_ignores,
             progress: None,
@@ -543,12 +549,17 @@ fn signature(actor: &Actor) -> Signature {
     }
 }
 
-fn base_ignores() -> Result<Arc<GitIgnoreFile>, Error> {
+/// The engine's boundary as one virtual root .gitignore: its own internals
+/// plus the mount names it must never version (anchored, so a nested
+/// directory that merely shares a mount's name stays content).
+fn base_ignores(boundary: &[String]) -> Result<Arc<GitIgnoreFile>, Error> {
+    let mut rules = String::from(".atelier/\n.git/\n.jj/\n");
+    for name in boundary {
+        rules.push('/');
+        rules.push_str(name);
+        rules.push_str("/\n");
+    }
     GitIgnoreFile::empty()
-        .chain(
-            RepoPath::root(),
-            Path::new(".gitignore"),
-            b".atelier/\n.git/\n.jj/\n",
-        )
+        .chain(RepoPath::root(), Path::new(".gitignore"), rules.as_bytes())
         .map_err(engine_err)
 }

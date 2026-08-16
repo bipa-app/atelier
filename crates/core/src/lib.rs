@@ -28,4 +28,4 @@ pub use read::{MAX_READ_WINDOW, ReadResult, ReadWindow};
 pub use render::{printable, render_diff};
 pub use session::{Instruction, Session, SessionId, SessionState};
 pub use watch::{WatchEvent, WatchStop};
-pub use workspace::{Snapshot, Workspace};
+pub use workspace::{Snapshot, SourceSnapshot, Workspace};
