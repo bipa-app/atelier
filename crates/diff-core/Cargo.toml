@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The format-independent diff model: addressed deltas and the fidelity ladder"
-publish = false
+keywords = ["diff", "documents", "versioning", "fidelity"]
+categories = ["text-processing", "data-structures"]
 
 [lints]
 workspace = true
