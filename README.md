@@ -1,6 +1,11 @@
-<img src="assets/logo.svg" alt="atelier" width="96" align="right"/>
 
-# atelier
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/cover-dark.svg">
+    <img src="assets/cover-light.svg" alt="atelier - versioned workspaces for humans and agents" width="100%">
+  </picture>
+</p>
 
 [![crates.io](https://img.shields.io/crates/v/atelier-sdk.svg)](https://crates.io/crates/atelier-sdk)
 [![docs.rs](https://img.shields.io/docsrs/atelier-sdk)](https://docs.rs/atelier-sdk)
