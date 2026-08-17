@@ -1,16 +1,18 @@
-//! The hosted substrate's first slice (ADR-0013, H1): rustyriver embedded
-//! behind the house's contained-runtime seam. This crate currently proves
-//! the wheel — streaming replication and restore of a workspace's store —
-//! before ownership records (H2) and serving (H3) lean on it.
+//! The hosted substrate (ADR-0013): rustyriver embedded behind the
+//! house's contained-runtime seam (H1), ownership records and fencing
+//! epochs (H2), and the node that claims, hydrates, serves, and releases
+//! a workspace (H3).
 
 use std::fmt;
 use std::path::Path;
 
+pub mod node;
 pub mod ownership;
+pub use node::{HostedNode, NodeClaim, NodePaths, ReplicateOutcome};
 // Re-exported so hosts (and tests) construct stores against the same
 // version the ownership plane speaks.
 pub use object_store;
-pub use ownership::{ClaimOutcome, Ownership, OwnershipRecord, file_url};
+pub use ownership::{ClaimOutcome, Ownership, OwnershipRecord, ReleaseOutcome, file_url};
 
 use rustyriver::{Db, FileReplicaClient, Replica, ReplicaClient, TXID, restore};
 use tokio::runtime::Runtime;
@@ -33,8 +35,10 @@ pub(crate) fn hosted_err(source: impl fmt::Display) -> HostedError {
 }
 
 /// A workspace store under replication: rustyriver's WAL-to-LTX capture
-/// loop bound to a file-backed replica. Object-store backends arrive with
-/// the ownership slice (H2); the capture semantics are identical.
+/// loop bound to a file-backed replica. A bucket-backed replica waits on
+/// rustyriver speaking the record plane's `object_store` version (it
+/// pins 0.11; the plane speaks 0.14); the capture semantics are
+/// identical.
 pub struct StoreReplica {
     replica: Replica<FileReplicaClient>,
     runtime: Runtime,
