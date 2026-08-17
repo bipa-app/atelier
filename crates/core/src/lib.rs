@@ -11,7 +11,7 @@
 //! never half-applies. Every act becomes a [`JournalEntry`] in the
 //! append-only journal. Diffs ride a fidelity ladder ([`Diff`]): every
 //! file compares at least as bytes, text raises to line diffs, and format
-//! packages — Word documents via `atelier-format-docx` — raise to deltas
+//! packages — Word documents via `atelier-sdk-docx` — raise to deltas
 //! in the format's own terms. A workspace attaches sources — local
 //! folders, git repositories, bucket prefixes — each mounted with its own
 //! history; landings fan out per source and mirror back.
@@ -26,7 +26,7 @@
 //! `~/.config/atelier/config.toml`):
 //!
 //! ```
-//! use atelier_core::{GateOutcome, Instruction, Workspace};
+//! use atelier_sdk::{GateOutcome, Instruction, Workspace};
 //!
 //! # #[expect(unsafe_code, reason = "set_var points the lookup at the scratch config")]
 //! # fn set_config_home(home: &std::path::Path) {
@@ -74,10 +74,10 @@ mod store;
 mod watch;
 mod workspace;
 
-pub use atelier_diff_core::{
+pub use atelier_sdk_diff::{
     Address, Confidence, Delta, DeltaKind, Diff, Fidelity, Line, LineKind, PackageId,
 };
-pub use atelier_source_remote::is_remote_url;
+pub use atelier_sdk_remote::is_remote_url;
 pub use config::{
     Actor, ActorKind, InstructionFidelity, JournalPolicy, LandingPolicy, Source, SourceKind,
     SyncPolicy,

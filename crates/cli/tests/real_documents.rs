@@ -23,7 +23,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use atelier_core::{Act, DeltaKind, Fidelity, LineKind, Workspace};
+use atelier_sdk::{Act, DeltaKind, Fidelity, LineKind, Workspace};
 use tempfile::TempDir;
 
 fn fixtures() -> PathBuf {

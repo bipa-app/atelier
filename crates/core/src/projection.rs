@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use atelier_diff_core::PackageId;
+use atelier_sdk_diff::PackageId;
 use sha2::{Digest, Sha256};
 
 use crate::engine::FileBlob;

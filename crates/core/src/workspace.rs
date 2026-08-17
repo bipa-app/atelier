@@ -5,14 +5,14 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use atelier_source_remote::RemoteFolder;
+use atelier_sdk_remote::RemoteFolder;
 use sha2::{Digest, Sha256};
 
-use atelier_diff_core::{
+use atelier_sdk_diff::{
     Address, Delta, DeltaKind, Diff, Fidelity, FormatPackage, PackageId, as_text, detect_package,
     diff_lines,
 };
-use atelier_format_docx::DocxPackage;
+use atelier_sdk_docx::DocxPackage;
 use notify::{Event, RecursiveMode, Watcher};
 
 use crate::config::{

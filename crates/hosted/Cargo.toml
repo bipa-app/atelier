@@ -15,7 +15,7 @@ url.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-atelier-core = { path = "../core" }
+atelier-sdk = { path = "../core" }
 rusqlite.workspace = true
 tempfile.workspace = true
 

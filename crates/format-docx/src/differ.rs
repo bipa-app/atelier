@@ -9,7 +9,7 @@
 
 use std::io::Cursor;
 
-use atelier_diff_core::{Address, Delta, PackageId};
+use atelier_sdk_diff::{Address, Delta, PackageId};
 use quick_xml::events::BytesStart;
 use quick_xml::reader::NsReader;
 use similar::{Algorithm, DiffOp, capture_diff_slices};

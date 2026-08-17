@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-atelier-core = { path = "../core" }
+atelier-sdk = { path = "../core" }
 atelier-surface = { path = "../surface" }
 clap.workspace = true
 time.workspace = true

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use atelier_core::{Error, Workspace};
+use atelier_sdk::{Error, Workspace};
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -338,11 +338,11 @@ fn a_session_spans_every_source() {
     ws.attach_mount(app.path(), "app").unwrap();
     ws.attach_mount(docs.path(), "docs").unwrap();
 
-    let actor = atelier_core::Actor {
+    let actor = atelier_sdk::Actor {
         name: "scribe".to_owned(),
-        kind: atelier_core::ActorKind::Agent,
+        kind: atelier_sdk::ActorKind::Agent,
     };
-    let instruction = atelier_core::Instruction {
+    let instruction = atelier_sdk::Instruction {
         summary: "touch two projects".to_owned(),
         run_ref: None,
         verbatim: None,
@@ -394,7 +394,7 @@ fn a_session_spans_every_source() {
     // One request fans out: the root and the touched mount land, the
     // untouched docs source is never touched — no lease, no landing.
     let outcome = ws.land(session.id).unwrap();
-    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+    let atelier_sdk::GateOutcome::Landed { landings } = outcome else {
         panic!("the fan-out must land both touched sources, got {outcome:?}");
     };
     let landed: Vec<Option<&str>> = landings
@@ -416,7 +416,7 @@ fn a_session_spans_every_source() {
     let entries = ws.journal(50).unwrap();
     let land_refs: Vec<&str> = entries
         .iter()
-        .filter(|entry| entry.act == atelier_core::Act::Land)
+        .filter(|entry| entry.act == atelier_sdk::Act::Land)
         .filter_map(|entry| entry.reference.as_deref())
         .collect();
     assert_eq!(land_refs.len(), 2, "journal: {entries:#?}");
@@ -430,7 +430,7 @@ fn a_session_spans_every_source() {
     );
     assert_eq!(
         ws.session(session.id).unwrap().state,
-        atelier_core::SessionState::Landed
+        atelier_sdk::SessionState::Landed
     );
 }
 
@@ -449,11 +449,11 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
     ws.attach_mount(a.path(), "aa").unwrap();
     ws.attach_mount(b.path(), "bb").unwrap();
 
-    let actor = atelier_core::Actor {
+    let actor = atelier_sdk::Actor {
         name: "scribe".to_owned(),
-        kind: atelier_core::ActorKind::Agent,
+        kind: atelier_sdk::ActorKind::Agent,
     };
-    let instruction = atelier_core::Instruction {
+    let instruction = atelier_sdk::Instruction {
         summary: "land across two projects".to_owned(),
         run_ref: None,
         verbatim: None,
@@ -469,7 +469,7 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
     ws.journal(1).unwrap();
 
     let outcome = ws.land(session.id).unwrap();
-    let atelier_core::GateOutcome::Parked {
+    let atelier_sdk::GateOutcome::Parked {
         request,
         landings,
         parked,
@@ -494,7 +494,7 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
     );
     assert_eq!(
         ws.session(session.id).unwrap().state,
-        atelier_core::SessionState::Open
+        atelier_sdk::SessionState::Open
     );
 
     // The landed line's bookmark moved; the parked line has none to move.
@@ -521,7 +521,7 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
     ws.session_write(session.id, "bb/c.txt", "the resolution\n")
         .unwrap();
     let outcome = ws.approve(request.id, &actor).unwrap();
-    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+    let atelier_sdk::GateOutcome::Landed { landings } = outcome else {
         panic!("the resolved retry must land, got {outcome:?}");
     };
     let landed: Vec<Option<&str>> = landings
@@ -539,13 +539,13 @@ fn a_parked_mount_leaves_the_landed_sources_standing() {
     );
     assert_eq!(
         ws.session(session.id).unwrap().state,
-        atelier_core::SessionState::Landed
+        atelier_sdk::SessionState::Landed
     );
     // aa landed exactly once: one land act names it across both applies.
     let entries = ws.journal(100).unwrap();
     let aa_lands = entries
         .iter()
-        .filter(|entry| entry.act == atelier_core::Act::Land)
+        .filter(|entry| entry.act == atelier_sdk::Act::Land)
         .filter(|entry| {
             entry
                 .reference
@@ -574,7 +574,7 @@ fn watch_routes_external_edits_into_the_owning_history() {
         .snapshot
         .id;
 
-    let stop = atelier_core::WatchStop::new();
+    let stop = atelier_sdk::WatchStop::new();
     let loop_stop = stop.clone();
     let (tx, events) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
@@ -592,7 +592,7 @@ fn watch_routes_external_edits_into_the_owning_history() {
         events
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the watcher arms"),
-        atelier_core::WatchEvent::Started
+        atelier_sdk::WatchEvent::Started
     );
 
     fs::write(
@@ -604,7 +604,7 @@ fn watch_routes_external_edits_into_the_owning_history() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the mount edit snapshots");
     assert!(
-        matches!(event, atelier_core::WatchEvent::Snapshotted { .. }),
+        matches!(event, atelier_sdk::WatchEvent::Snapshotted { .. }),
         "got: {event:?}"
     );
     stop.stop();
@@ -624,7 +624,7 @@ fn watch_routes_external_edits_into_the_owning_history() {
     let entries = ws.journal(20).unwrap();
     assert!(
         entries.iter().any(|entry| {
-            entry.act == atelier_core::Act::Snapshot
+            entry.act == atelier_sdk::Act::Snapshot
                 && entry
                     .reference
                     .as_deref()
@@ -645,11 +645,11 @@ fn the_manifest_orients_an_arriving_actor() {
     let app = tempfile::tempdir().unwrap();
     fs::write(app.path().join("main.rs"), "fn main() {}\n").unwrap();
     let source = ws.attach_mount(app.path(), "app").unwrap();
-    let actor = atelier_core::Actor {
+    let actor = atelier_sdk::Actor {
         name: "scribe".to_owned(),
-        kind: atelier_core::ActorKind::Agent,
+        kind: atelier_sdk::ActorKind::Agent,
     };
-    let instruction = atelier_core::Instruction {
+    let instruction = atelier_sdk::Instruction {
         summary: "read the room".to_owned(),
         run_ref: None,
         verbatim: None,
@@ -727,11 +727,11 @@ fn a_landing_moves_the_branch_a_plain_push_carries() {
     };
     let sdk = root.path().join("sdk");
 
-    let actor = atelier_core::Actor {
+    let actor = atelier_sdk::Actor {
         name: "scribe".to_owned(),
-        kind: atelier_core::ActorKind::Agent,
+        kind: atelier_sdk::ActorKind::Agent,
     };
-    let instruction = atelier_core::Instruction {
+    let instruction = atelier_sdk::Instruction {
         summary: "ship the landed line".to_owned(),
         run_ref: None,
         verbatim: None,
@@ -748,7 +748,7 @@ fn a_landing_moves_the_branch_a_plain_push_carries() {
     );
 
     let outcome = ws.land(session.id).unwrap();
-    let atelier_core::GateOutcome::Landed { landings } = outcome else {
+    let atelier_sdk::GateOutcome::Landed { landings } = outcome else {
         panic!("the land must land, got {outcome:?}");
     };
     let root_landing = &landings[0];

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use atelier_core::{
+use atelier_sdk::{
     Act, Actor, ActorKind, Error, GateOutcome, Instruction, RequestState, SessionState, Workspace,
 };
 

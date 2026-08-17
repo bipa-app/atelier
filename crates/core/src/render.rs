@@ -1,4 +1,4 @@
-use atelier_diff_core::{Delta, DeltaKind, Diff, LineKind};
+use atelier_sdk_diff::{Delta, DeltaKind, Diff, LineKind};
 
 /// The diff as printable lines: every face renders the same comparison
 /// through this one path (ADR-0006).
@@ -71,7 +71,7 @@ fn delta_label(kind: DeltaKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use atelier_diff_core::{Address, Delta, DeltaKind, Fidelity};
+    use atelier_sdk_diff::{Address, Delta, DeltaKind, Fidelity};
 
     use super::{printable, render_delta};
 
