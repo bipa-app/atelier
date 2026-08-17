@@ -13,7 +13,6 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use atelier_core::{Actor, ActorKind, GateOutcome, Instruction, Workspace};
 use atelier_hosted::object_store::ObjectStore;
 use atelier_hosted::object_store::memory::InMemory;
 use atelier_hosted::object_store::path::Path as ObjectPath;
@@ -21,6 +20,7 @@ use atelier_hosted::{
     HostedNode, NodeClaim, NodePaths, Ownership, OwnershipRecord, ReleaseOutcome, ReplicateOutcome,
     latest_txid, restore_to,
 };
+use atelier_sdk::{Actor, ActorKind, GateOutcome, Instruction, Workspace};
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
 fn env_lock() -> MutexGuard<'static, ()> {

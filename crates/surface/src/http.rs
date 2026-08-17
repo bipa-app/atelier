@@ -2,7 +2,7 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 
-use atelier_core::{Error, Workspace, render_diff};
+use atelier_sdk::{Error, Workspace, render_diff};
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -12,7 +12,7 @@ use crate::mcp::{ToolFailure, dispatch, handle_message};
 /// JSON-RPC messages; anything past this is not a workspace operation.
 const BODY_SIZE_MAX: usize = 8 * 1024 * 1024;
 // A full read window always fits in one response body.
-const _: () = assert!(atelier_core::READ_WINDOW_MAX <= BODY_SIZE_MAX);
+const _: () = assert!(atelier_sdk::READ_WINDOW_MAX <= BODY_SIZE_MAX);
 
 /// Serve the workspace at `root` over HTTP: MCP streamable HTTP at
 /// `/mcp`, the same verbs as plain REST under `/v1` — one dispatch,

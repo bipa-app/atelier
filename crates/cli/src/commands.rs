@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use atelier_core::{
+use atelier_sdk::{
     GateOutcome, JournalEntry, PullOutcome, RequestId, SessionId, SyncOutcome, WatchEvent,
     WatchStop, Workspace, printable, render_diff,
 };
@@ -165,7 +165,7 @@ fn init(path: Option<PathBuf>) -> Result<Vec<String>> {
 fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
     let root = env::current_dir().context("read the current directory")?;
     let mut workspace = Workspace::open(root)?;
-    let attached = if atelier_core::is_remote_url(source) {
+    let attached = if atelier_sdk::is_remote_url(source) {
         let Some(name) = mount else {
             bail!("remote sources mount; pass --mount <name>");
         };
@@ -375,7 +375,7 @@ fn run_in_session(
         Some(summary) => summary.to_owned(),
         None => format!("run: {}", command.join(" ")),
     };
-    let instruction = atelier_core::Instruction {
+    let instruction = atelier_sdk::Instruction {
         summary,
         run_ref: None,
         verbatim: None,
@@ -481,7 +481,7 @@ fn render_outcome(outcome: &GateOutcome) -> Vec<String> {
     }
 }
 
-fn render_landing(landing: &atelier_core::Landing) -> String {
+fn render_landing(landing: &atelier_sdk::Landing) -> String {
     match &landing.source {
         Some(source) => format!("landed {source} {}", landing.snapshot),
         None => format!("landed {}", landing.snapshot),

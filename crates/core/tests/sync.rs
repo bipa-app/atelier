@@ -6,9 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use atelier_core::{
-    Act, Actor, ActorKind, Error, GateOutcome, Instruction, SyncOutcome, Workspace,
-};
+use atelier_sdk::{Act, Actor, ActorKind, Error, GateOutcome, Instruction, SyncOutcome, Workspace};
 
 /// Serialize tests: they all set the process-wide `ATELIER_CONFIG_HOME`.
 fn env_lock() -> MutexGuard<'static, ()> {

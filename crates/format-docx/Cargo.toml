@@ -1,5 +1,5 @@
 [package]
-name = "atelier-format-docx"
+name = "atelier-sdk-docx"
 version = "0.3.0"
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ categories = ["text-processing", "parser-implementations"]
 workspace = true
 
 [dependencies]
-atelier-diff-core = { version = "0.1.0", path = "../diff-core" }
+atelier-sdk-diff = { version = "0.1.0", path = "../diff-core" }
 similar.workspace = true
 quick-xml.workspace = true
 thiserror.workspace = true

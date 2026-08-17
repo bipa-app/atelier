@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use atelier_core::{
+use atelier_sdk::{
     Act, Actor, ActorKind, Error, GateOutcome, Instruction, PullOutcome, SyncOutcome, Workspace,
 };
 

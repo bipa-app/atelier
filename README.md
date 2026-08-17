@@ -51,19 +51,18 @@ From there:
 
 ## The SDK
 
-Everything the CLI does, the `atelier-core` crate does directly (not yet on
-crates.io; use the git dependency):
+Everything the CLI does, the `atelier-sdk` crate does directly:
 
 ```toml
 [dependencies]
-atelier-core = { git = "https://github.com/bipa-app/atelier" }
+atelier-sdk = "0.1"
 ```
 
 With the actor configured as above, a workspace, a session, one write, and
 a landing through the gate:
 
 ```rust
-use atelier_core::{GateOutcome, Instruction, Workspace};
+use atelier_sdk::{GateOutcome, Instruction, Workspace};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut workspace = Workspace::init("demo")?;
@@ -83,10 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Under `atelier-core` sit three crates you can use alone:
-`atelier-diff-core` (the diff model and fidelity ladder),
-`atelier-format-docx` (Word documents projected to markdown and diffed),
-and `atelier-source-remote` (bucket-backed sources over `object_store`).
+Under `atelier-sdk` sit three crates you can use alone:
+`atelier-sdk-diff` (the diff model and fidelity ladder),
+`atelier-sdk-docx` (Word documents projected to markdown and diffed),
+and `atelier-sdk-remote` (bucket-backed sources over `object_store`).
 
 ## Contributing
 

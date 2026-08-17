@@ -3,8 +3,8 @@
 
 use std::io::{Cursor, Write};
 
-use atelier_diff_core::{DeltaKind, Fidelity, FormatPackage};
-use atelier_format_docx::DocxPackage;
+use atelier_sdk_diff::{DeltaKind, Fidelity, FormatPackage};
+use atelier_sdk_docx::DocxPackage;
 use zip::write::SimpleFileOptions;
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -46,7 +46,7 @@ fn paragraph(rpr: &str, text: &str) -> String {
     format!("<w:p><w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>")
 }
 
-fn rich(before_body: &str, after_body: &str) -> Vec<atelier_diff_core::Delta> {
+fn rich(before_body: &str, after_body: &str) -> Vec<atelier_sdk_diff::Delta> {
     DocxPackage
         .diff(&docx(before_body), &docx(after_body))
         .expect("the docx package ships a differ")

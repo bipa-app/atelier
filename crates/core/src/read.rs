@@ -1,4 +1,4 @@
-use atelier_diff_core::PackageId;
+use atelier_sdk_diff::PackageId;
 
 use crate::error::Error;
 
