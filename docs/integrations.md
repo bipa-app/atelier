@@ -115,11 +115,12 @@ args = ["serve", "--mcp-stdio"]
 }
 ```
 
-## harness
+## Other MCP-native harnesses
 
-harness's daemon speaks MCP natively; register the workspace server in the daemon's MCP
-configuration the same way. The deeper integration — harness sessions whose working
-copies are atelier session working copies — is tracked as dogfood slice D3.
+Any harness whose daemon speaks MCP natively registers the workspace server in
+its MCP configuration the same way. The deeper integration — harness sessions
+whose working copies are atelier session working copies — is tracked as dogfood
+slice D3.
 
 ## The AGENTS.md paragraph
 

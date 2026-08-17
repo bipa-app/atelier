@@ -1,7 +1,6 @@
 # Plan: atelier v2 — multi-source workspaces
 
 > **Source PRD**: `plans/prd-atelier.md` (user stories 1, 2, 4, 6, 14) · **Decision**: `docs/adr/0009`
-> **Tracker**: the project tracker 
 > **Status**: Approved (model B ratified 2026-08-16)
 > **Owner**: Luiz Parreira
 

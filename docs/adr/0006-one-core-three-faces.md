@@ -4,7 +4,7 @@ atelier ships as a Rust SDK (the core library), an MCP/HTTP server, and the `ate
 
 ## Considered options
 
-- CLI-first, extract a library later: rejected — extraction after the fact is the classic painful path, and the embedders this project exists for (harness, [internal], [internal]) need the library from day one.
+- CLI-first, extract a library later: rejected — extraction after the fact is the classic painful path, and the embedders this project exists for (internal agent harnesses and services) need the library from day one.
 - MCP-only surface: rejected — scripts, services, and a future UI should not need an MCP client to read a diff.
 
 ## Consequences

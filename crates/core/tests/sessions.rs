@@ -136,7 +136,10 @@ fn an_agent_session_lands_through_the_gate() {
         opened.instruction_summary.as_deref(),
         Some("redline the draft")
     );
-    assert_eq!(opened.instruction_run_ref.as_deref(), Some("harness:run/42"));
+    assert_eq!(
+        opened.instruction_run_ref.as_deref(),
+        Some("harness:run/42")
+    );
     // The default policy keeps the summary, never the verbatim prompt.
     assert_eq!(opened.instruction_verbatim, None);
     for act in [Act::LandRequest, Act::Approve, Act::Land] {

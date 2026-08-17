@@ -1,13 +1,12 @@
 # Plan: atelier v1 — tracer bullet
 
 > **Source PRD**: `plans/prd-atelier.md`
-> **Tracker**: the project tracker 
 > **Status**: Approved
 > **Owner**: Luiz Parreira
 
 ## Why this exists
 
-Bipa has built three ad-hoc agent workspaces ([internal]'s R2 git server, harness's workspaces, [internal] case files) and each rebuilds the same substrate badly: docs don't diff, actions aren't attributed, concurrency is improvised. atelier extracts that substrate into one open-source tool. v1 is a single tracer bullet — one workspace, one agent, one doc, one diff — proving the whole domain model end-to-end: auto-snapshot engine, diff ladder, agent session with landing, and the journal. Everything later (profiles, remote sources, rich differs, hosted runtime) widens this path; nothing replaces it.
+Three earlier internal agent-workspace attempts each rebuilt the same substrate badly: docs don't diff, actions aren't attributed, concurrency is improvised. atelier extracts that substrate into one open-source tool. v1 is a single tracer bullet — one workspace, one agent, one doc, one diff — proving the whole domain model end-to-end: auto-snapshot engine, diff ladder, agent session with landing, and the journal. Everything later (profiles, remote sources, rich differs, hosted runtime) widens this path; nothing replaces it.
 
 ## Project mappings
 
@@ -47,7 +46,7 @@ Recorded as ADRs in `docs/adr/`; vocabulary in `CONTEXT.md`. Durable across all 
 
 ## Holistic scope
 
-- **Compliance**: N/A for v1 (no Bipa data). The journal + verbatim capture design (ADR-0004) is the future compliance surface.
+- **Compliance**: N/A for v1 (no production data). The journal + verbatim capture design (ADR-0004) is the future compliance surface.
 - **Legal**: Apache-2.0 committed at repo root. No CLA for now.
 - **Security**: agent surface binds localhost only in v1; no network exposure.
 - **Business model / pricing**: none — open source.

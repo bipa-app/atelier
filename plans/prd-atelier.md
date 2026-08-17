@@ -5,7 +5,7 @@
 
 ## Problem
 
-Every team building with agents hand-rolls the same thing: a place for agents to work. Bipa alone has built three — [internal] (R2 + a git server per project), harness's own workspaces, and a case-file attempt for the [internal] fraud analyst. Each rebuilds versioned storage, coordination, and attribution, and each falls short the same ways: documents don't diff, agent actions aren't attributed or auditable, concurrent actors collide ad hoc, and only code — never the spreadsheet or the contract — gets real version control.
+Every team building with agents hand-rolls the same thing: a place for agents to work. Bipa — the company behind this repository, which open-sourced it — alone built three earlier internal agent-workspace attempts. Each rebuilds versioned storage, coordination, and attribution, and each falls short the same ways: documents don't diff, agent actions aren't attributed or auditable, concurrent actors collide ad hoc, and only code — never the spreadsheet or the contract — gets real version control.
 
 ## Solution
 
