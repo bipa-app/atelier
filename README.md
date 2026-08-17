@@ -47,6 +47,45 @@ From there:
 - `atelier serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
 - `atelier sessions` / `atelier requests` / `atelier approve <id>` — review and land an agent's change.
 
+## The SDK
+
+Everything the CLI does, the `atelier-core` crate does directly (not yet on
+crates.io; use the git dependency):
+
+```toml
+[dependencies]
+atelier-core = { git = "https://github.com/bipa-app/atelier" }
+```
+
+With the actor configured as above, a workspace, a session, one write, and
+a landing through the gate:
+
+```rust
+use atelier_core::{GateOutcome, Instruction, Workspace};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut workspace = Workspace::init("demo")?;
+    let actor = workspace.actor().clone();
+    let session = workspace.open_session(
+        &actor,
+        &Instruction {
+            summary: "draft the notes".to_owned(),
+            run_ref: None,
+            verbatim: None,
+        },
+    )?;
+    workspace.session_write(session.id, "notes.md", "The first note.\n")?;
+    let outcome = workspace.land(session.id)?;
+    assert!(matches!(outcome, GateOutcome::Landed { .. }));
+    Ok(())
+}
+```
+
+Under `atelier-core` sit three crates you can use alone:
+`atelier-diff-core` (the diff model and fidelity ladder),
+`atelier-format-docx` (Word documents projected to markdown and diffed),
+and `atelier-source-remote` (bucket-backed sources over `object_store`).
+
 ## Contributing
 
 CI runs the same gates you run locally: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — including how to ship support for a new document format as its own package.
