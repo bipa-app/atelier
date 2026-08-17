@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use atelier_core::{Act, ActorKind, DeltaKind, WatchEvent, WatchStop, Workspace};
+use atelier_sdk::{Act, ActorKind, DeltaKind, WatchEvent, WatchStop, Workspace};
 
 /// The acceptance bound: an external edit becomes a snapshot within this.
 const BOUND: Duration = Duration::from_secs(5);

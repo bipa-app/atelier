@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use atelier_core::{
+use atelier_sdk::{
     Actor, ActorKind, Error, GateOutcome, Instruction, JournalEntry, LandingRequest, RequestId,
     SessionId, Workspace, render_diff,
 };
@@ -211,29 +211,29 @@ fn requests_json(workspace: &mut Workspace) -> Result<Value, ToolFailure> {
 }
 
 /// A sync outcome as the wire carries it (ADR-0010).
-fn sync_json(outcome: &atelier_core::SyncOutcome) -> Value {
+fn sync_json(outcome: &atelier_sdk::SyncOutcome) -> Value {
     match outcome {
-        atelier_core::SyncOutcome::Synced { snapshot } => {
+        atelier_sdk::SyncOutcome::Synced { snapshot } => {
             json!({"state": "synced", "snapshot_id": snapshot})
         }
-        atelier_core::SyncOutcome::Parked { snapshot } => {
+        atelier_sdk::SyncOutcome::Parked { snapshot } => {
             json!({"state": "parked", "snapshot_id": snapshot})
         }
     }
 }
 
 /// A pull outcome as the wire carries it (ADR-0012).
-fn pull_json(outcome: &atelier_core::PullOutcome) -> Value {
+fn pull_json(outcome: &atelier_sdk::PullOutcome) -> Value {
     match outcome {
-        atelier_core::PullOutcome::Pulled { snapshot } => {
+        atelier_sdk::PullOutcome::Pulled { snapshot } => {
             json!({"state": "pulled", "snapshot_id": snapshot})
         }
-        atelier_core::PullOutcome::Current => json!({"state": "current"}),
+        atelier_sdk::PullOutcome::Current => json!({"state": "current"}),
     }
 }
 
 /// A session's identity and state as the wire carries them.
-fn session_state_json(session: &atelier_core::Session) -> Value {
+fn session_state_json(session: &atelier_sdk::Session) -> Value {
     json!({
         "session_id": session.id.to_string(),
         "state": session.state.as_str(),
@@ -242,7 +242,7 @@ fn session_state_json(session: &atelier_core::Session) -> Value {
 
 /// An undo as the wire carries it: the re-opened request and each line's
 /// restored head, `null` source naming the root.
-fn undo_json(id: atelier_core::RequestId, restores: &[atelier_core::Restore]) -> Value {
+fn undo_json(id: atelier_sdk::RequestId, restores: &[atelier_sdk::Restore]) -> Value {
     let lines: Vec<Value> = restores
         .iter()
         .map(|restore| json!({"source": restore.source, "head": restore.head}))
@@ -251,7 +251,7 @@ fn undo_json(id: atelier_core::RequestId, restores: &[atelier_core::Restore]) ->
 }
 
 /// A windowed read as the wire carries it: content, window, continuation.
-fn read_json(result: &atelier_core::ReadResult) -> Value {
+fn read_json(result: &atelier_sdk::ReadResult) -> Value {
     json!({
         "content": result.content,
         "window": {
@@ -364,7 +364,7 @@ fn outcome_json(outcome: &GateOutcome) -> Value {
     }
 }
 
-fn landings_json(landings: &[atelier_core::Landing]) -> Vec<Value> {
+fn landings_json(landings: &[atelier_sdk::Landing]) -> Vec<Value> {
     landings
         .iter()
         .map(|landing| {

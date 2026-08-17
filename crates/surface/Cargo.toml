@@ -12,5 +12,5 @@ workspace = true
 
 [dependencies]
 tiny_http.workspace = true
-atelier-core = { path = "../core" }
+atelier-sdk = { path = "../core" }
 serde_json.workspace = true

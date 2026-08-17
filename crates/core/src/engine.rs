@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use atelier_diff_core::{Diff, diff_listings};
+use atelier_sdk_diff::{Diff, diff_listings};
 use futures::{AsyncReadExt, StreamExt};
 use jj_lib::backend::{CommitId, Signature, Timestamp, TreeValue};
 use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};

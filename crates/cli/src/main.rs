@@ -1,10 +1,10 @@
 //! The `atelier` binary: versioned workspaces for humans and AI agents,
-//! thin over the SDK in `atelier-core`.
+//! thin over the SDK in `atelier-sdk`.
 
 mod commands;
 
 use anyhow::Result;
-use atelier_core::Error;
+use atelier_sdk::Error;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 

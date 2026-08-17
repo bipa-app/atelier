@@ -4,8 +4,8 @@
 
 use std::io::{Cursor, Write};
 
-use atelier_diff_core::{Confidence, FormatPackage, LineKind, diff_lines};
-use atelier_format_docx::DocxPackage;
+use atelier_sdk_diff::{Confidence, FormatPackage, LineKind, diff_lines};
+use atelier_sdk_docx::DocxPackage;
 use zip::write::SimpleFileOptions;
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

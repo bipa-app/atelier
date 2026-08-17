@@ -153,7 +153,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "atelier-core",
+ "atelier-sdk",
  "atelier-surface",
  "clap",
  "predicates",
@@ -165,12 +165,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelier-core"
+name = "atelier-hosted"
 version = "0.1.0"
 dependencies = [
- "atelier-diff-core",
- "atelier-format-docx",
- "atelier-source-remote",
+ "atelier-sdk",
+ "futures",
+ "object_store 0.14.1",
+ "rusqlite",
+ "rustyriver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "atelier-sdk"
+version = "0.1.0"
+dependencies = [
+ "atelier-sdk-diff",
+ "atelier-sdk-docx",
+ "atelier-sdk-remote",
  "futures",
  "gix-hash",
  "jj-lib",
@@ -186,7 +202,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelier-diff-core"
+name = "atelier-sdk-diff"
 version = "0.1.0"
 dependencies = [
  "similar",
@@ -194,10 +210,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelier-format-docx"
+name = "atelier-sdk-docx"
 version = "0.3.0"
 dependencies = [
- "atelier-diff-core",
+ "atelier-sdk-diff",
  "quick-xml 0.41.0",
  "similar",
  "thiserror",
@@ -205,23 +221,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelier-hosted"
-version = "0.1.0"
-dependencies = [
- "atelier-core",
- "futures",
- "object_store 0.14.1",
- "rusqlite",
- "rustyriver",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "atelier-source-remote"
+name = "atelier-sdk-remote"
 version = "0.1.0"
 dependencies = [
  "futures",
@@ -235,7 +235,7 @@ dependencies = [
 name = "atelier-surface"
 version = "0.1.0"
 dependencies = [
- "atelier-core",
+ "atelier-sdk",
  "serde_json",
  "tiny_http",
 ]

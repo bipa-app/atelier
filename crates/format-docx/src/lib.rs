@@ -18,7 +18,7 @@ mod projection;
 
 use std::path::Path;
 
-use atelier_diff_core::{Confidence, Delta, FormatPackage, PackageError, PackageId, Projection};
+use atelier_sdk_diff::{Confidence, Delta, FormatPackage, PackageError, PackageId, Projection};
 
 /// Every zip archive — and so every docx — starts with these bytes.
 const ZIP_MAGIC: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
