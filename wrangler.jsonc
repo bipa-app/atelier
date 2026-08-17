@@ -3,6 +3,10 @@
 {
   "name": "atelier-site",
   "compatibility_date": "2026-08-17",
+  "routes": [
+    { "pattern": "atelier-ws.dev", "custom_domain": true },
+    { "pattern": "www.atelier-ws.dev", "custom_domain": true }
+  ],
   "assets": {
     "directory": "./website",
     "html_handling": "auto-trailing-slash",
