@@ -1,0 +1,11 @@
+// Cloudflare Workers deploy of the static site in website/.
+// Deploy: npx wrangler deploy   (assets-only worker, no code)
+{
+  "name": "atelier-site",
+  "compatibility_date": "2026-08-17",
+  "assets": {
+    "directory": "./website",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}
