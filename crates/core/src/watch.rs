@@ -20,7 +20,10 @@ pub enum WatchEvent {
     /// scan for edits made while no watcher ran follows immediately.
     Started,
     /// Outstanding edits became this snapshot, journaled like any snapshot.
-    Snapshotted { snapshot: String },
+    Snapshotted {
+        /// The snapshot's id.
+        snapshot: String,
+    },
 }
 
 /// Stops a running watch loop from another thread; the loop returns within
@@ -29,6 +32,7 @@ pub enum WatchEvent {
 pub struct WatchStop(Arc<AtomicBool>);
 
 impl WatchStop {
+    /// A fresh, un-triggered stop handle.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

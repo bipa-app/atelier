@@ -1,3 +1,6 @@
+//! The `atelier` binary: versioned workspaces for humans and AI agents,
+//! thin over the SDK in `atelier-core`.
+
 mod commands;
 
 use anyhow::Result;

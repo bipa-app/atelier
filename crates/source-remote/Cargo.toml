@@ -1,9 +1,12 @@
 [package]
 name = "atelier-source-remote"
 version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The remote source adapter: bucket prefixes over object_store behind a blocking seam"
+keywords = ["s3", "object-store", "sync", "bucket"]
+categories = ["filesystem"]
 
 [dependencies]
 futures.workspace = true

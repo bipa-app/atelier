@@ -11,8 +11,12 @@ use crate::error::Error;
 /// summary and run reference; verbatim capture is policy-decided (ADR-0004).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instruction {
+    /// A one-line statement of what the session is for.
     pub summary: String,
+    /// A reference to the run that carried the instruction: a ticket, a
+    /// conversation, a pipeline id.
     pub run_ref: Option<String>,
+    /// The instruction's verbatim body, when the caller supplies it.
     pub verbatim: Option<String>,
 }
 
@@ -41,8 +45,11 @@ impl FromStr for SessionId {
 /// its own change, journal entries grouped under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
+    /// The session's identity.
     pub id: SessionId,
+    /// Who the session belongs to.
     pub actor: Actor,
+    /// Where the session stands.
     pub state: SessionState,
     /// The stable identity of the session's unit of work on the root —
     /// source zero; it survives rewrites — amended snapshots and the
@@ -56,15 +63,20 @@ pub struct Session {
     /// working copy at `<mount>/`. A real directory on disk: sessions
     /// survive process restarts.
     pub working_copy: PathBuf,
+    /// The instruction's summary, as journaled at open.
     pub instruction_summary: String,
+    /// The instruction's run reference, when one was given.
     pub instruction_run_ref: Option<String>,
+    /// When the session opened, in unix milliseconds.
     pub opened_at_ms: i64,
 }
 
 /// One source's change under a session: the root's when `source` is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceChange {
+    /// The mount the change belongs to; `None` for the root.
     pub source: Option<String>,
+    /// The stable identity of the session's unit of work on this source.
     pub change_id: String,
 }
 
@@ -72,12 +84,16 @@ pub struct SourceChange {
 /// without landing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
+    /// Open for work.
     Open,
+    /// The session's change landed on the shared line.
     Landed,
+    /// Closed without landing; its work stays in history.
     Abandoned,
 }
 
 impl SessionState {
+    /// The state's canonical lowercase name, as stored and rendered.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
