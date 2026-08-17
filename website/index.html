@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>atelier - versioned workspaces for humans and agents</title>
+<meta name="description" content="atelier answers what a workspace is in the age of agents: a named, versioned body of work content with its own history, journal, profile, and policy.">
+<meta property="og:title" content="atelier">
+<meta property="og:description" content="Versioned workspaces for humans and AI agents.">
+<style>
+:root{--bg:#131518;--fg:#f0ede8;--mut:#9aa0a6;--acc:#F4482A;--card:#1b1e23;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+*{margin:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:17px/1.6 ui-sans-serif,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif}
+main{max-width:880px;margin:0 auto;padding:72px 24px 96px}
+.hero{display:flex;align-items:center;justify-content:space-between;gap:32px;margin-bottom:12px}
+h1{font-size:72px;font-weight:700;letter-spacing:-3px}
+.mark{width:120px;flex:none}
+.tag{color:var(--mut);font-size:22px;margin-bottom:40px}
+.links{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:56px}
+.links a{color:var(--fg);text-decoration:none;border:1px solid #333842;border-radius:8px;padding:8px 16px;font-size:15px}
+.links a:hover{border-color:var(--acc)}
+.links a.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+h2{font-size:15px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--mut);margin:48px 0 16px}
+p{margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{background:var(--card);border-radius:10px;padding:20px}
+.card b{display:block;margin-bottom:6px}
+.card span{color:var(--mut);font-size:15px}
+pre{background:var(--card);border-radius:10px;padding:20px;overflow-x:auto;font-family:var(--mono);font-size:14px;line-height:1.7}
+code{font-family:var(--mono)}
+.c{color:#6a737d}.o{color:var(--acc)}
+footer{margin-top:72px;color:var(--mut);font-size:14px}
+footer a{color:var(--mut)}
+@media(max-width:640px){h1{font-size:48px;letter-spacing:-2px}.mark{width:80px}}
+</style>
+</head>
+<body>
+<main>
+<div class="hero">
+<h1>atelier</h1>
+<svg class="mark" viewBox="700 700 660 660" xmlns="http://www.w3.org/2000/svg"><path fill="#F4482A" d="M 1196.03 849.508 C 1197.04 849.838 1196.35 849.542 1197.76 850.942 C 1198.56 888.303 1197.92 928.741 1197.72 966.188 L 1305.93 966.336 C 1306.44 1079.56 1306.19 1192.79 1305.19 1306.02 L 959.322 1306.04 L 959.198 1223.96 L 1002.57 1223.92 C 1002.3 1236.66 1002.48 1250.08 1002.46 1262.87 L 1264.41 1262.61 C 1264.93 1178.29 1264.85 1093.97 1264.18 1009.66 C 1253 1009.04 1237.66 1009.5 1226.23 1009.5 L 1155.36 1009.43 L 1155.14 893.875 L 1006.5 893.93 L 895.257 894.159 L 895.019 1153.42 C 927.809 1153.04 960.783 1153.84 993.613 1153.83 C 1047.62 1153.5 1101.62 1153.44 1155.62 1153.65 C 1155.27 1119.93 1155.15 1086.2 1155.28 1052.47 C 1170.05 1052.62 1185.12 1052.46 1199.92 1052.45 L 1200 1197.93 C 1166.83 1197.31 1132.43 1197.85 1099.16 1197.74 C 1016.58 1197.25 933.991 1197.29 851.41 1197.86 C 849.417 1083.9 851.606 964.618 851.946 850.253 C 965.535 847.709 1082.02 850.998 1196.03 849.508 z"/><path fill="#F4482A" d="M 743.016 742.996 L 1087.58 743.026 L 1087.96 824.943 L 1045.48 824.99 C 1044.86 813.747 1045.2 798.784 1045.13 787.257 C 959.463 787.727 873.791 787.641 788.122 786.998 L 787.444 787.564 C 786.263 791.753 786.892 844.319 786.901 853.595 L 786.987 1041.1 L 828.09 1041.03 L 828.032 1083.76 L 742.664 1083.67 L 743.016 742.996 z"/><path fill="#F4482A" d="M 1045.8 915.929 L 1090.04 915.966 L 1090.1 937.585 C 1089.86 999.607 1069.99 1003.05 1028.13 1039.26 C 1003.84 1060.27 1000.98 1096.43 1001.21 1127.15 L 958.279 1127.11 C 958.147 1122.68 958.086 1118.26 958.096 1113.83 C 958.551 1044.78 986.237 1013.6 1037.58 977.598 C 1049.76 969.051 1045.85 932.274 1045.8 915.929 z"/></svg>
+</div>
+<p class="tag">Versioned workspaces for humans and AI agents.</p>
+<div class="links">
+<a class="primary" href="https://github.com/bipa-app/atelier">GitHub</a>
+<a href="https://crates.io/crates/atelier-sdk">crates.io</a>
+<a href="https://docs.rs/atelier-sdk">docs.rs</a>
+</div>
+<p>atelier answers <em>"what is a workspace in the age of agents"</em>: a named, versioned body of work content - code, spreadsheets, contracts, docs - with its own history, journal, profile, and policy, served to humans and agents through the same contracts.</p>
+<h2>The model</h2>
+<div class="grid">
+<div class="card"><b>Everything is versioned</b><span>No unversioned state; every edit becomes a snapshot. Jujutsu's model is the engine, git is the boundary - every workspace is a real git repo.</span></div>
+<div class="card"><b>Documents diff like code</b><span>One diff library, a fidelity ladder (binary &rarr; projected text &rarr; rich), format support shipped as packages. First package: docx &rarr; markdown.</span></div>
+<div class="card"><b>Actions are recorded</b><span>History records content states; the journal records acts and intent - who, in which session, on whose instruction, with what approval.</span></div>
+<div class="card"><b>Agents are first-class</b><span>Sessions, working copies, leases, landing, and a manifest, exposed over MCP and the CLI.</span></div>
+</div>
+<h2>Quickstart</h2>
+<pre><code><span class="c"># the SDK</span>
+cargo add <span class="o">atelier-sdk</span>
+
+<span class="c"># the CLI</span>
+atelier init && atelier attach ./contracts
+atelier diff        <span class="c"># fidelity-ladder diff: docx reads as markdown</span>
+atelier journal     <span class="c"># who did what, on whose instruction</span>
+atelier serve --mcp-stdio  <span class="c"># the agent surface</span></code></pre>
+<footer>Apache-2.0 &middot; <a href="https://github.com/bipa-app/atelier">bipa-app/atelier</a> &middot; pre-alpha, under active design</footer>
+</main>
+</body>
+</html>
