@@ -1,14 +1,16 @@
 //! Ownership and fencing (ADR-0013, H2): two claimants cannot share a
 //! workspace, every activation advances the epoch, a deposed writer's
-//! late writes land in a superseded lineage no restore selects, and the
-//! acknowledgement rule refuses a stale holder without consulting a clock.
+//! late writes land in a superseded lineage no restore selects, the
+//! acknowledgement rule refuses a stale holder without consulting a
+//! clock, and a release keeps the epoch as a high-water mark no
+//! activation reuses.
 
 use std::sync::Arc;
 
 use atelier_hosted::object_store::ObjectStore;
 use atelier_hosted::object_store::memory::InMemory;
 use atelier_hosted::object_store::path::Path as ObjectPath;
-use atelier_hosted::{ClaimOutcome, Ownership};
+use atelier_hosted::{ClaimOutcome, Ownership, OwnershipRecord, ReleaseOutcome};
 
 /// Two node handles over one shared store — the in-memory backend
 /// implements the conditional writes the ownership record requires
@@ -39,7 +41,10 @@ fn one_claim_wins_and_the_other_learns_who_holds() {
             epoch: 1
         }
     );
-    assert_eq!(node_b.holder().unwrap().unwrap().holder, "node-a");
+    assert_eq!(
+        node_b.record().unwrap().unwrap().holder.as_deref(),
+        Some("node-a")
+    );
 
     // A re-activates: same holder, advanced epoch — an epoch never has
     // two writers, not even the same node across wakes.
@@ -47,6 +52,58 @@ fn one_claim_wins_and_the_other_learns_who_holds() {
         node_a.claim("node-a").unwrap(),
         ClaimOutcome::Held { epoch: 2 }
     );
+}
+
+#[test]
+fn a_release_keeps_the_epoch_as_high_water() {
+    let (node_a, node_b) = two_nodes();
+
+    assert_eq!(
+        node_a.claim("node-a").unwrap(),
+        ClaimOutcome::Held { epoch: 1 }
+    );
+
+    // The release is guarded: it clears the holder, keeps the epoch.
+    assert_eq!(
+        node_a.release("node-a", 1).unwrap(),
+        ReleaseOutcome::Released
+    );
+    assert_eq!(
+        node_a.record().unwrap(),
+        Some(OwnershipRecord {
+            holder: None,
+            epoch: 1
+        })
+    );
+
+    // A released workspace claims plainly — no takeover needed — and the
+    // epoch advances past the high-water mark, never reusing it.
+    assert_eq!(
+        node_b.claim("node-b").unwrap(),
+        ClaimOutcome::Held { epoch: 2 }
+    );
+
+    // Stale releases refuse by name: the old holder at the old epoch, the
+    // new holder at a stale epoch, and a repeat after the record moved.
+    assert_eq!(
+        node_a.release("node-a", 1).unwrap(),
+        ReleaseOutcome::NotHeld
+    );
+    assert_eq!(
+        node_b.release("node-b", 1).unwrap(),
+        ReleaseOutcome::NotHeld
+    );
+    assert_eq!(
+        node_b.release("node-b", 2).unwrap(),
+        ReleaseOutcome::Released
+    );
+    assert_eq!(
+        node_b.release("node-b", 2).unwrap(),
+        ReleaseOutcome::NotHeld
+    );
+
+    // A holderless record still refuses every acknowledgement.
+    assert!(!node_b.confirm("node-b", 2).unwrap());
 }
 
 #[test]

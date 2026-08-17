@@ -3,7 +3,9 @@
 //! advances the epoch; the data path writes plainly under epoch-prefixed
 //! keys, so a deposed writer lands in a superseded lineage; an
 //! acknowledgement re-reads the record, so a stale node cannot make a
-//! promise the surviving lineage does not keep.
+//! promise the surviving lineage does not keep. A release clears the
+//! holder but keeps the record: the epoch is a high-water mark no
+//! activation ever reuses.
 
 use std::path::Path as FsPath;
 use std::sync::Arc;
@@ -20,8 +22,9 @@ use crate::{HostedError, hosted_err};
 /// The one ownership record a workspace has in the bucket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipRecord {
-    /// The node session that owns the workspace.
-    pub holder: String,
+    /// The node session that holds the workspace; a released workspace
+    /// keeps its record with no holder, preserving the epoch.
+    pub holder: Option<String>,
     /// The fencing epoch: advanced on every activation, never reused —
     /// an epoch has exactly one writer, ever.
     pub epoch: u64,
@@ -34,6 +37,17 @@ pub enum ClaimOutcome {
     Held { epoch: u64 },
     /// Another holder owns the workspace; a plain claim never seizes.
     HeldByOther { holder: String, epoch: u64 },
+}
+
+/// What one release attempt produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The record now names no holder; the epoch stays as the high-water
+    /// mark the next activation advances past.
+    Released,
+    /// The record does not name this holder at this epoch — the workspace
+    /// moved on and the release is moot.
+    NotHeld,
 }
 
 /// A workspace's ownership plane in the bucket: the record and the
@@ -73,17 +87,21 @@ impl Ownership {
     }
 
     /// Claim the workspace for `holder`: a conditional create when no
-    /// record exists, a compare-and-swap over this holder's own record on
-    /// re-activation — either way the epoch advances. A record naming
-    /// another holder refuses; seizing is `take_over`, a deliberate act.
+    /// record exists, a compare-and-swap over a released record or this
+    /// holder's own on re-activation — either way the epoch advances. A
+    /// record naming another holder refuses; seizing is `take_over`, a
+    /// deliberate act.
     pub fn claim(&self, holder: &str) -> Result<ClaimOutcome, HostedError> {
-        let current = self.record()?;
+        let current = self.record_with_version()?;
         match &current {
-            Some((record, _)) if record.holder != holder => Ok(ClaimOutcome::HeldByOther {
-                holder: record.holder.clone(),
-                epoch: record.epoch,
-            }),
-            _ => self.advance(holder, current),
+            Some((record, _)) => match &record.holder {
+                Some(other) if other != holder => Ok(ClaimOutcome::HeldByOther {
+                    holder: other.clone(),
+                    epoch: record.epoch,
+                }),
+                Some(_) | None => self.advance(holder, current),
+            },
+            None => self.advance(holder, current),
         }
     }
 
@@ -91,22 +109,48 @@ impl Ownership {
     /// the epoch advances, so the deposed writer's lineage is superseded —
     /// its late writes land under a prefix no restore selects.
     pub fn take_over(&self, holder: &str) -> Result<ClaimOutcome, HostedError> {
-        let current = self.record()?;
+        let current = self.record_with_version()?;
         self.advance(holder, current)
+    }
+
+    /// Release the workspace: a guarded write that clears the holder and
+    /// keeps the epoch as the high-water mark. A record that no longer
+    /// names `holder` at `epoch` refuses — the workspace moved on and the
+    /// release is moot.
+    pub fn release(&self, holder: &str, epoch: u64) -> Result<ReleaseOutcome, HostedError> {
+        let Some((record, version)) = self.record_with_version()? else {
+            return Ok(ReleaseOutcome::NotHeld);
+        };
+        if record.holder.as_deref() != Some(holder) {
+            return Ok(ReleaseOutcome::NotHeld);
+        }
+        if record.epoch != epoch {
+            return Ok(ReleaseOutcome::NotHeld);
+        }
+        let released = OwnershipRecord {
+            holder: None,
+            epoch,
+        };
+        if self.write_record(&released, PutMode::Update(version))? {
+            Ok(ReleaseOutcome::Released)
+        } else {
+            Ok(ReleaseOutcome::NotHeld)
+        }
     }
 
     /// The acknowledgement rule: re-read the record and answer whether it
     /// still names `holder` at `epoch`. A paused or partitioned node fails
     /// this read; no clock is consulted.
     pub fn confirm(&self, holder: &str, epoch: u64) -> Result<bool, HostedError> {
-        Ok(self
-            .record()?
-            .is_some_and(|(record, _)| record.holder == holder && record.epoch == epoch))
+        Ok(self.record_with_version()?.is_some_and(|(record, _)| {
+            record.holder.as_deref() == Some(holder) && record.epoch == epoch
+        }))
     }
 
-    /// The current record, if any, with the version a swap must name.
-    pub fn holder(&self) -> Result<Option<OwnershipRecord>, HostedError> {
-        Ok(self.record()?.map(|(record, _)| record))
+    /// The current record, if any — holder-bearing while a node serves,
+    /// holderless after a release, absent before the first claim.
+    pub fn record(&self) -> Result<Option<OwnershipRecord>, HostedError> {
+        Ok(self.record_with_version()?.map(|(record, _)| record))
     }
 
     /// A plain data-path write under `epoch`'s lineage: the fence is the
@@ -148,8 +192,13 @@ impl Ownership {
         ObjectPath::from(lineage.trim_end_matches('/').to_owned())
     }
 
-    fn record(&self) -> Result<Option<(OwnershipRecord, UpdateVersion)>, HostedError> {
-        let location = ObjectPath::from(format!("{}/ownership", self.prefix));
+    fn record_path(&self) -> ObjectPath {
+        ObjectPath::from(format!("{}/ownership", self.prefix))
+    }
+
+    /// The current record with the version a swap must name.
+    fn record_with_version(&self) -> Result<Option<(OwnershipRecord, UpdateVersion)>, HostedError> {
+        let location = self.record_path();
         self.runtime.block_on(async {
             match self.store.get(&location).await {
                 Ok(result) => {
@@ -178,39 +227,52 @@ impl Ownership {
     ) -> Result<ClaimOutcome, HostedError> {
         let epoch = current.as_ref().map_or(1, |(record, _)| record.epoch + 1);
         let record = OwnershipRecord {
-            holder: holder.to_owned(),
+            holder: Some(holder.to_owned()),
             epoch,
         };
         let mode = match current {
             None => PutMode::Create,
             Some((_, version)) => PutMode::Update(version),
         };
-        let location = ObjectPath::from(format!("{}/ownership", self.prefix));
-        let payload = serde_json::to_vec(&record).map_err(hosted_err)?;
+        if self.write_record(&record, mode)? {
+            return Ok(ClaimOutcome::Held { epoch });
+        }
+        // Lost the race: whoever won holds the point; say who.
+        match self.record_with_version()? {
+            Some((record, _)) => match record.holder {
+                Some(holder) => Ok(ClaimOutcome::HeldByOther {
+                    holder,
+                    epoch: record.epoch,
+                }),
+                None => Err(HostedError(
+                    "the ownership write lost a race to a release; claim again".to_owned(),
+                )),
+            },
+            None => Err(HostedError(
+                "the ownership write lost a race to a record that then vanished".to_owned(),
+            )),
+        }
+    }
+
+    /// One conditional write of the record: true when the bucket accepted
+    /// it, false when another writer moved the record first.
+    fn write_record(&self, record: &OwnershipRecord, mode: PutMode) -> Result<bool, HostedError> {
+        let payload = serde_json::to_vec(record).map_err(hosted_err)?;
         let options = PutOptions {
             mode,
             ..PutOptions::default()
         };
         let written = self.runtime.block_on(self.store.put_opts(
-            &location,
+            &self.record_path(),
             PutPayload::from_bytes(payload.into()),
             options,
         ));
         match written {
-            Ok(_) => Ok(ClaimOutcome::Held { epoch }),
-            // Lost the race: whoever won holds the point; say who.
+            Ok(_) => Ok(true),
             Err(
                 object_store::Error::AlreadyExists { .. }
                 | object_store::Error::Precondition { .. },
-            ) => match self.record()? {
-                Some((record, _)) => Ok(ClaimOutcome::HeldByOther {
-                    holder: record.holder,
-                    epoch: record.epoch,
-                }),
-                None => Err(HostedError(
-                    "the ownership write lost a race to a record that then vanished".to_owned(),
-                )),
-            },
+            ) => Ok(false),
             Err(error) => Err(hosted_err(error)),
         }
     }
