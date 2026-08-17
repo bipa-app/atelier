@@ -57,11 +57,11 @@ installer covers every harness that tool knows (Claude Code, codex, Cursor,
 OpenHands, and a dozen others), project- or user-level:
 
 ```sh
-npx skills add bipa-app/atelier        # needs read access; the repo is private
+npx skills add bipa-app/atelier
 ```
 
-The repo is not listed in the public skills.sh registry (`npx skills find`)
-until it goes public — listing is part of the pending announce decision.
+The repository is public, so the skills.sh registry can index it and
+`npx skills find` surfaces it as usage accrues.
 
 Native plugin installs, where a harness has its own machinery:
 
