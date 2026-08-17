@@ -11,7 +11,7 @@ containing `.atelier/` is a workspace: **never edit its files directly** — the
 shared line only moves through the landing gate. Work through a session.
 
 The `atelier` binary must be on PATH (build from the repo:
-`cargo build -p atelier-cli`).
+`cargo build -p atelier-ws`).
 
 ## Detect and orient
 

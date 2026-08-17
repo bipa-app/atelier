@@ -148,23 +148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelier-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "atelier-sdk",
- "atelier-surface",
- "clap",
- "predicates",
- "serde_json",
- "tempfile",
- "time",
- "tracing-subscriber",
- "zip",
-]
-
-[[package]]
 name = "atelier-hosted"
 version = "0.1.0"
 dependencies = [
@@ -238,6 +221,23 @@ dependencies = [
  "atelier-sdk",
  "serde_json",
  "tiny_http",
+]
+
+[[package]]
+name = "atelier-ws"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "atelier-sdk",
+ "atelier-surface",
+ "clap",
+ "predicates",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
