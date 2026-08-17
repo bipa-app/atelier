@@ -50,6 +50,7 @@ assert_cmd = "2"
 predicates = { version = "3", default-features = false, features = ["diff", "regex"] }
 
 [workspace.lints.rust]
+missing_docs = "warn"
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

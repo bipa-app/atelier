@@ -10,15 +10,20 @@ pub const READ_WINDOW_MAX: usize = 50_000;
 /// the projection's for a projected document, the document's own otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadWindow {
+    /// The window's first byte offset.
     pub start: usize,
+    /// The offset one past the window's last byte.
     pub end: usize,
+    /// The whole text's size in bytes.
     pub total: usize,
 }
 
 /// One windowed read: bounded content plus the cursor to continue from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadResult {
+    /// The window's content.
     pub content: String,
+    /// Where the content sits in the text.
     pub window: ReadWindow,
     /// The byte offset the next read starts at; `None` when this window
     /// reached the end.

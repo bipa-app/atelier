@@ -51,10 +51,16 @@ const LANDED_BOOKMARK: &str = "atelier";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncOutcome {
     /// The origin now mirrors the landed snapshot.
-    Synced { snapshot: String },
+    Synced {
+        /// The snapshot the origin now mirrors.
+        snapshot: String,
+    },
     /// The origin changed out-of-band since the last recorded sync;
     /// nothing was written. `atelier sync --force` overwrites deliberately.
-    Parked { snapshot: String },
+    Parked {
+        /// The landed snapshot that still waits to sync.
+        snapshot: String,
+    },
 }
 
 /// The remote handle was not opened for a remote target: unreachable by
@@ -70,7 +76,10 @@ fn unreachable_remote<T>() -> Result<T, Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PullOutcome {
     /// The bucket's changes folded into the line as this snapshot.
-    Pulled { snapshot: String },
+    Pulled {
+        /// The snapshot the fold produced.
+        snapshot: String,
+    },
     /// The bucket already matches the last sync; nothing to fold.
     Current,
 }
@@ -2070,7 +2079,9 @@ impl SessionTips {
 /// `None`, else the named mount's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSnapshot {
+    /// The mount the snapshot belongs to; `None` for the root.
     pub source: Option<String>,
+    /// The snapshot itself.
     pub snapshot: Snapshot,
 }
 

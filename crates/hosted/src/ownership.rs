@@ -34,9 +34,17 @@ pub struct OwnershipRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimOutcome {
     /// The record now names this holder at this epoch.
-    Held { epoch: u64 },
+    Held {
+        /// The epoch this holder now writes under.
+        epoch: u64,
+    },
     /// Another holder owns the workspace; a plain claim never seizes.
-    HeldByOther { holder: String, epoch: u64 },
+    HeldByOther {
+        /// The node session that holds the workspace.
+        holder: String,
+        /// The epoch the holder writes under.
+        epoch: u64,
+    },
 }
 
 /// What one release attempt produced.
