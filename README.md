@@ -2,6 +2,9 @@
 
 # atelier
 
+[![crates.io](https://img.shields.io/crates/v/atelier-sdk.svg)](https://crates.io/crates/atelier-sdk)
+[![docs.rs](https://img.shields.io/docsrs/atelier-sdk)](https://docs.rs/atelier-sdk)
+
 Versioned workspaces for humans and AI agents.
 
 atelier answers "what is a workspace in the age of agents": a named, versioned body of work content — code, spreadsheets, contracts, docs — with its own history, journal, profile, and policy, served to humans and agents through the same contracts.
