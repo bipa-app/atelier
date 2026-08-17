@@ -33,27 +33,39 @@ impl FromStr for RequestId {
 /// parks, or closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandingRequest {
+    /// The request's identity.
     pub id: RequestId,
+    /// The session whose change the request would land.
     pub session_id: SessionId,
+    /// Who opened the request.
     pub requester: Actor,
+    /// Where the request stands in its gate.
     pub state: RequestState,
     /// The approvals counting toward the gate; dismissed ones are gone.
     pub approvals: Vec<Approval>,
+    /// When the request opened, in unix milliseconds.
     pub created_at_ms: i64,
 }
 
 /// Where a landing request stands in its gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestState {
+    /// Open, gathering approvals.
     Open,
+    /// The gate is satisfied; the apply has not run.
     Approved,
+    /// The change landed on the shared line.
     Landed,
+    /// The apply hit a conflict; a new snapshot re-opens the gate.
     Parked,
+    /// An approver rejected the request.
     Rejected,
+    /// The session closed without landing.
     Abandoned,
 }
 
 impl RequestState {
+    /// The state's canonical lowercase name, as stored and rendered.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -106,24 +118,31 @@ impl FromSql for RequestState {
 /// snapshot of the change it covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
+    /// Who approved.
     pub actor: Actor,
+    /// The snapshot of the change the approval covered.
     pub snapshot: String,
+    /// When the approval was granted, in unix milliseconds.
     pub at_ms: i64,
 }
 
-/// One source's landing under a request: the root's when `source` is
 /// One line a landed request stepped back off (ADR-0011): the source
 /// and the head the line returned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Restore {
+    /// The mount the line belongs to; `None` for the root.
     pub source: Option<String>,
+    /// The snapshot the line's head returned to.
     pub head: String,
 }
 
+/// One source's landing under a request: the root's when `source` is
 /// `None`; the source's shared line's new head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landing {
+    /// The mount the landing belongs to; `None` for the root.
     pub source: Option<String>,
+    /// The landed snapshot, the source's shared line's new head.
     pub snapshot: String,
 }
 
@@ -133,18 +152,26 @@ pub struct Landing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateOutcome {
     /// Every touched source landed.
-    Landed { landings: Vec<Landing> },
+    Landed {
+        /// The landings, one per touched source.
+        landings: Vec<Landing>,
+    },
     /// The gate wants more approvals before the apply runs.
     Pending {
+        /// The request as it stands, approvals included.
         request: LandingRequest,
+        /// How many approvals the gate needs in total.
         required: u32,
     },
     /// At least one source's apply hit a conflict: the request parked,
     /// that line did not move — and the sources in `landings` landed
     /// before or despite it (ADR-0007, per line).
     Parked {
+        /// The request, now parked.
         request: LandingRequest,
+        /// The landings that happened before or despite the conflict.
         landings: Vec<Landing>,
+        /// The sources whose applies conflicted; `None` names the root.
         parked: Vec<Option<String>>,
     },
 }

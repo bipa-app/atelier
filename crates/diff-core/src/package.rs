@@ -10,7 +10,9 @@ use crate::model::Delta;
 /// on it, so a version bump is a new projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PackageId {
+    /// The package's name, unique across the registry.
     pub name: &'static str,
+    /// The package's semver version; a bump is a new projection.
     pub version: &'static str,
 }
 
@@ -24,7 +26,9 @@ impl fmt::Display for PackageId {
 /// that produced it. The original document is always kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
+    /// The package that produced the text.
     pub package: PackageId,
+    /// The deterministic text rendering.
     pub text: String,
 }
 
@@ -32,7 +36,9 @@ pub struct Projection {
 #[derive(Debug, Error)]
 #[error("{package}: {reason}")]
 pub struct PackageError {
+    /// The package that refused.
     pub package: PackageId,
+    /// Why it refused, in the package's own words.
     pub reason: String,
 }
 

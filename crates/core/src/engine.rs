@@ -42,9 +42,13 @@ const _: () = assert!(LADDER_FILE_SIZE_MAX <= NEW_FILE_SIZE_MAX);
 /// One immutable whole-workspace state in history, attributed to an actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    /// The snapshot's stable identity.
     pub id: String,
+    /// The actor the snapshot is attributed to.
     pub actor: String,
+    /// When the snapshot was taken, in unix milliseconds.
     pub at_ms: i64,
+    /// The ids of the snapshot's parents in history.
     pub parents: Vec<String>,
 }
 

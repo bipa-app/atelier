@@ -29,7 +29,12 @@ pub enum NodeClaim {
     Serving(Box<HostedNode>),
     /// Another holder owns the workspace; claiming never seizes — that
     /// is `take_over`, a deliberate act.
-    HeldByOther { holder: String, epoch: u64 },
+    HeldByOther {
+        /// The node session that holds the workspace.
+        holder: String,
+        /// The epoch the holder writes under.
+        epoch: u64,
+    },
 }
 
 /// What one replication pass produced.

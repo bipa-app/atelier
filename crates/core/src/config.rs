@@ -10,7 +10,9 @@ use crate::error::{Error, config_err};
 /// The actor a workspace attributes its snapshots and journal entries to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Actor {
+    /// The actor's display name, as it appears in the journal.
     pub name: String,
+    /// What kind of actor this is.
     pub kind: ActorKind,
 }
 
@@ -18,12 +20,16 @@ pub struct Actor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ActorKind {
+    /// A person.
     Human,
+    /// An AI agent.
     Agent,
+    /// An unattended process: a watcher, a bot, a pipeline.
     Automation,
 }
 
 impl ActorKind {
+    /// The kind's canonical lowercase name, as stored and rendered.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -112,9 +118,15 @@ fn actor_config_path() -> Option<PathBuf> {
 /// v1 root import — content folded into source zero, no engine of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
+    /// The kind of origin the source is.
     pub kind: SourceKind,
+    /// The origin's location: a folder path, a git repository path, or a
+    /// bucket URL for remote sources.
     pub path: PathBuf,
+    /// How content moves between the workspace and the source.
     pub sync: SyncPolicy,
+    /// The subdirectory whose engine carries the source's history; `/`
+    /// marks a v1 root import.
     pub mount: String,
     /// The git branch adoption found checked out; every landing on this
     /// source moves it, so plain `git push` carries the shared line.
@@ -130,7 +142,10 @@ pub(crate) const ROOT_MOUNT: &str = "/";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
+    /// A plain folder; content mirrors both ways on landings.
     LocalFolder,
+    /// A git repository; adoption preserves its history and landings move
+    /// its branch.
     LocalGit,
     /// A bucket prefix behind the remote adapter (ADR-0012): s3://, gs://,
     /// az://, or file:// for tests. The source path holds the URL.
@@ -151,6 +166,7 @@ impl fmt::Display for SourceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncPolicy {
+    /// Changes land back into the source and source changes fold in.
     TwoWay,
 }
 
@@ -186,8 +202,11 @@ pub struct WorkspaceSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LandingPolicy {
+    /// How many approvals a landing request needs.
     pub approvals: u32,
+    /// Whether the requester may approve their own request.
     pub allow_self_approve: bool,
+    /// Whether a new snapshot on the change dismisses standing approvals.
     pub dismiss_approvals_on_new_snapshots: bool,
 }
 
@@ -206,6 +225,7 @@ impl Default for LandingPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JournalPolicy {
+    /// How much of a session's instruction the journal keeps.
     pub instruction_fidelity: InstructionFidelity,
 }
 
@@ -222,7 +242,9 @@ impl Default for JournalPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstructionFidelity {
+    /// The summary and run reference only.
     Summary,
+    /// Additionally the instruction's verbatim body.
     Verbatim,
 }
 

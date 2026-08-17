@@ -11,8 +11,11 @@ use crate::error::{Error, engine_err};
 /// One thing an actor can do to a workspace that the journal records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
+    /// A workspace came into being.
     WorkspaceInit,
+    /// A source was attached to the workspace; the reference names it.
     SourceAttach,
+    /// A snapshot recorded the working copy; the reference names it.
     Snapshot,
     /// A format package failed or panicked over a document; the diff fell
     /// back to the binary rung. The entry's reference names the document,
@@ -60,6 +63,7 @@ pub enum Act {
 }
 
 impl Act {
+    /// The act's canonical `snake_case` name, as stored and rendered.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -146,14 +150,24 @@ impl FromSql for ActorKind {
 /// One record in a workspace's journal: who did what, and any intent behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
+    /// When the act happened, in unix milliseconds.
     pub at_ms: i64,
+    /// The acting actor's display name.
     pub actor_name: String,
+    /// What kind of actor acted.
     pub actor_kind: ActorKind,
+    /// What the actor did.
     pub act: Act,
+    /// The session the act belongs to, when it happened inside one.
     pub session: Option<String>,
+    /// The instruction's summary, on `session_open` entries.
     pub instruction_summary: Option<String>,
+    /// A reference to the run that carried the instruction.
     pub instruction_run_ref: Option<String>,
+    /// The instruction's verbatim body, when policy keeps it (ADR-0004).
     pub instruction_verbatim: Option<String>,
+    /// What the act refers to, in the act's own terms: a snapshot, a
+    /// request, a source.
     pub reference: Option<String>,
 }
 
