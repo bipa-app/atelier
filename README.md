@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" alt="atelier" width="96" align="right"/>
+
 # atelier
 
 Versioned workspaces for humans and AI agents.
