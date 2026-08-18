@@ -12,7 +12,7 @@
 //! (workspace root), then run
 //!
 //! ```text
-//! cargo test -p atelier-cli --test real_documents -- --ignored
+//! cargo test -p atelier-ws --test real_documents -- --ignored
 //! ```
 #![expect(
     clippy::too_many_lines,

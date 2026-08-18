@@ -13,7 +13,11 @@ const JOURNAL_LIMIT: usize = 100;
 const HISTORY_LIMIT: usize = 100;
 
 #[derive(Debug, Parser)]
-#[command(name = "atelier", about = "Versioned workspaces for humans and agents")]
+#[command(
+    name = "atelier",
+    version,
+    about = "Versioned workspaces for humans and agents"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,

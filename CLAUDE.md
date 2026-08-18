@@ -91,7 +91,7 @@ inside `#[test]` functions only — helpers in `tests/*.rs` files are not covere
 8. **Real documents stay local.** `fixtures/real/` is gitignored; the ignored
    `real_documents` test asserts structure, never content — confidential fixtures and their
    text never enter the repository. Run with
-   `cargo test -p atelier-cli --test real_documents -- --ignored`.
+   `cargo test -p atelier-ws --test real_documents -- --ignored`.
 
 ## Delivery (MUST)
 

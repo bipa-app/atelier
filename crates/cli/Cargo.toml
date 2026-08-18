@@ -1,11 +1,13 @@
 [package]
-name = "atelier-cli"
+name = "atelier-ws"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "atelier — versioned workspaces for humans and AI agents"
-publish = false
+readme = "../../README.md"
+keywords = ["versioning", "workspace", "agents", "diff", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
@@ -16,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-atelier-sdk = { path = "../core" }
-atelier-surface = { path = "../surface" }
+atelier-sdk = { version = "0.1.0", path = "../core" }
+atelier-surface = { version = "0.1.0", path = "../surface" }
 clap.workspace = true
 time.workspace = true
 tracing-subscriber.workspace = true
