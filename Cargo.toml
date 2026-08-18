@@ -81,3 +81,8 @@ struct_excessive_bools = { level = "allow", priority = 3 }
 too_many_arguments = {  level = "allow", priority = 3 }
 too_many_lines = { level = "warn", priority = 3 }
 unreadable_literal = { level = "allow", priority = 3 }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

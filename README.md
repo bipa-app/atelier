@@ -21,6 +21,16 @@ atelier answers "what is a workspace in the age of agents": a named, versioned b
 
 Status: pre-alpha, under active design.
 
+## Install
+
+```bash
+curl -fsSL https://atelier-ws.dev/install.sh | sh   # prebuilt binary (mac/linux)
+```
+
+Or with a Rust toolchain: `cargo install atelier-ws` (from crates.io) or
+`cargo install --git https://github.com/bipa-app/atelier atelier-ws` (from main).
+Each installs the `atelier` binary.
+
 ## Quickstart
 
 Build the `atelier` binary (the toolchain is pinned in `rust-toolchain.toml`):
