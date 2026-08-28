@@ -7,18 +7,19 @@ use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::default_backend_factories::{
     default_backend_factories, default_working_copy_factories, default_working_copy_factory,
 };
+use jj_lib::file_util;
 use jj_lib::git::{self, GitImportOptions};
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
-use jj_lib::repo::{ReadonlyRepo, Repo};
+use jj_lib::ref_name::{RefName, WorkspaceName, WorkspaceNameBuf};
+use jj_lib::repo::{ReadonlyRepo, Repo, RepoLoader};
 use jj_lib::repo_path::RepoPath;
 use jj_lib::rewrite::rebase_commit;
 use jj_lib::settings::UserSettings;
-use jj_lib::working_copy::SnapshotOptions;
+use jj_lib::working_copy::{SnapshotOptions, WorkingCopy};
 use jj_lib::workspace::{LockedWorkspace, Workspace as JjWorkspace};
 use pollster::block_on;
 use std::fs;
@@ -149,6 +150,92 @@ impl Engine {
             _settings: settings,
             boundary: boundary.to_vec(),
         })
+    }
+
+    /// Load the workspace store at `root` whose working copy a hydration
+    /// left absent, and rebuild it: the recorded working-copy commit
+    /// checks out into a fresh working copy — derived state
+    /// rematerializes from history (ADR-0013).
+    pub fn rematerialize(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
+        block_on(Self::rematerialize_async(root, actor, boundary))
+    }
+
+    async fn rematerialize_async(
+        root: &Path,
+        actor: &Actor,
+        boundary: &[String],
+    ) -> Result<Self, Error> {
+        let settings = build_settings(actor)?;
+        // Canonical, as the workspace loader would keep it: session
+        // registrations compute pointers relative to this path.
+        let repo_path = fs::canonicalize(root.join(".jj").join("repo"))?;
+        let loader =
+            RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
+                .map_err(engine_err)?;
+        let repo = loader.load_at_head().await.map_err(engine_err)?;
+        let name = WorkspaceName::DEFAULT;
+        let wc_id = match repo.view().get_wc_commit_id(name) {
+            Some(id) => id.clone(),
+            None => return Err(Error::Engine("no working-copy commit".to_owned())),
+        };
+        let wc_commit = repo.store().get_commit(&wc_id).map_err(engine_err)?;
+        let working_copy =
+            init_absent_working_copy(&repo, root, &root.join(".jj"), name.to_owned())?;
+        let mut jj = JjWorkspace::new(root, repo_path, working_copy, loader).map_err(engine_err)?;
+        jj.check_out(repo.op_id().clone(), None, &wc_commit)
+            .await
+            .map_err(engine_err)?;
+        Ok(Self {
+            jj,
+            repo,
+            _settings: settings,
+            boundary: boundary.to_vec(),
+        })
+    }
+
+    /// Rebuild one session's working copy at `root`: history records the
+    /// session workspace and its commit; only the on-disk state is absent
+    /// after a hydration. The engine's own store stays untouched — this
+    /// is jj's own registration minus the new commit it would create.
+    pub fn rematerialize_session_workspace(&self, root: &Path, name: &str) -> Result<(), Error> {
+        block_on(self.rematerialize_session_async(root, name))
+    }
+
+    async fn rematerialize_session_async(&self, root: &Path, name: &str) -> Result<(), Error> {
+        let ws_name = WorkspaceNameBuf::from(name);
+        let wc_id = match self.repo.view().get_wc_commit_id(&ws_name) {
+            Some(id) => id.clone(),
+            None => {
+                return Err(Error::Engine(format!(
+                    "history records no workspace {name}"
+                )));
+            }
+        };
+        let wc_commit = self.repo.store().get_commit(&wc_id).map_err(engine_err)?;
+        fs::create_dir_all(root)?;
+        let jj_dir = root.join(".jj");
+        fs::create_dir(&jj_dir)?;
+        // The session's store is the primary repo; the pointer is kept
+        // relative, so the workspace moves whole.
+        let repo_dir = self.jj.repo_path().to_path_buf();
+        let jj_dir_abs = fs::canonicalize(&jj_dir)?;
+        let pointer = file_util::relative_path(&jj_dir_abs, &repo_dir);
+        let pointer = if pointer.is_relative() {
+            file_util::slash_path(&pointer).into_owned()
+        } else {
+            pointer
+        };
+        let bytes = file_util::path_to_bytes(&pointer).map_err(engine_err)?;
+        fs::write(jj_dir.join("repo"), bytes)?;
+        let working_copy = init_absent_working_copy(&self.repo, root, &jj_dir, ws_name)?;
+        let mut session_ws =
+            JjWorkspace::new(root, repo_dir, working_copy, self.jj.repo_loader().clone())
+                .map_err(engine_err)?;
+        session_ws
+            .check_out(self.repo.op_id().clone(), None, &wc_commit)
+            .await
+            .map_err(engine_err)?;
+        Ok(())
     }
 
     /// Reload at the current operation head, folding in operations other
@@ -766,6 +853,32 @@ impl Engine {
         let commit = self.repo.store().get_commit(&root).map_err(engine_err)?;
         Ok(commit.tree())
     }
+}
+
+/// A fresh working-copy state for a workspace the repo already records:
+/// initialized empty at the repo's head operation, so the check-out that
+/// follows writes the recorded tree whole.
+fn init_absent_working_copy(
+    repo: &Arc<ReadonlyRepo>,
+    root: &Path,
+    jj_dir: &Path,
+    name: WorkspaceNameBuf,
+) -> Result<Box<dyn WorkingCopy>, Error> {
+    let state_path = jj_dir.join("working_copy");
+    fs::create_dir(&state_path)?;
+    let factory = default_working_copy_factory();
+    let working_copy = factory
+        .init_working_copy(
+            repo.store().clone(),
+            root.to_path_buf(),
+            state_path.clone(),
+            repo.op_id().clone(),
+            name,
+            repo.settings(),
+        )
+        .map_err(engine_err)?;
+    fs::write(state_path.join("type"), working_copy.name())?;
+    Ok(working_copy)
 }
 
 fn build_settings(actor: &Actor) -> Result<UserSettings, Error> {
