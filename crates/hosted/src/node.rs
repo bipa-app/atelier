@@ -1,25 +1,31 @@
-//! The hosted node (ADR-0013, H3): serving is claiming. A node claims a
-//! workspace's ownership record, hydrates the store from the newest
-//! surviving lineage, replicates under the held epoch, and releases on
-//! shutdown. Every replication acknowledges by re-reading the record, so
-//! a deposed node's replication surfaces refusal — its bytes landed in a
-//! superseded lineage and promise nothing.
+//! The hosted node (ADR-0013, H3/H4): serving is claiming. A node claims
+//! a workspace's ownership record, hydrates the stores from the newest
+//! surviving lineage — the `SQLite` store through rustyriver, the jj/git
+//! stores through the manifest — replicates under the held epoch, and
+//! releases on shutdown. Every replication acknowledges by re-reading the
+//! record, so a deposed node's replication surfaces refusal — its bytes
+//! landed in a superseded lineage and promise nothing.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
 
+use crate::area::ReplicaArea;
 use crate::ownership::{ClaimOutcome, Ownership, ReleaseOutcome};
-use crate::{HostedError, StoreReplica, latest_txid, restore_to};
+use crate::{HostedError, StoreReplica, stores};
 
-/// Where a hosted node keeps a workspace on its own machine: the store it
-/// serves and the replica area lineages replicate into. The replica area
-/// mirrors the ownership plane's `ltx/e<epoch>/` key layout — one
-/// directory per activation. It is file-backed until rustyriver speaks
-/// the same `object_store` version as the record plane.
+/// Where a hosted node keeps a workspace on its own machine, and where
+/// its lineages replicate into.
 pub struct NodePaths {
     /// The live `SQLite` store this node serves.
     pub store: PathBuf,
-    /// The replica area: one `e<epoch>` lineage per activation.
-    pub replica_root: PathBuf,
+    /// The workspace root whose engine stores (jj and git, root and
+    /// mounts) replicate beside the `SQLite` store. A root without
+    /// engine stores replicates the store alone.
+    pub root: PathBuf,
+    /// The replica area lineages replicate into — one `e<epoch>` lineage
+    /// per activation, file-backed or in the ownership plane's bucket.
+    pub replica: ReplicaArea,
 }
 
 /// What one node activation produced.
@@ -54,12 +60,17 @@ pub enum ReplicateOutcome {
 pub struct HostedNode {
     ownership: Ownership,
     replica: StoreReplica,
+    area: ReplicaArea,
     holder: String,
     epoch: u64,
+    root: PathBuf,
+    /// Content ids already in the bucket: engine-store uploads dedupe
+    /// against it, so unchanged files cost one hash, never a round trip.
+    objects: BTreeSet<String>,
 }
 
 impl HostedNode {
-    /// Claim the workspace for `holder` and serve it: hydrate the store
+    /// Claim the workspace for `holder` and serve it: hydrate the stores
     /// from the newest surviving lineage when this node has none, then
     /// replicate under the claimed epoch. A record naming another holder
     /// refuses.
@@ -106,8 +117,27 @@ impl HostedNode {
     /// must still name this node at this epoch, else the refusal
     /// surfaces. The upload itself never refuses — the fence is the epoch
     /// in the lineage, not a condition on the write.
+    ///
+    /// The `SQLite` store captures first and the manifest pins last —
+    /// with the exact transaction it covers — so hydration always
+    /// restores both stores from one completed pass.
     pub fn replicate(&mut self) -> Result<ReplicateOutcome, HostedError> {
         self.replica.sync()?;
+        let txid = match self.area.latest_txid(self.epoch)? {
+            Some(txid) => txid.0,
+            None => {
+                return Err(HostedError(
+                    "the lineage holds no transactions after a sync".to_owned(),
+                ));
+            }
+        };
+        stores::capture(
+            &self.root,
+            &self.ownership,
+            self.epoch,
+            txid,
+            &mut self.objects,
+        )?;
         if self.ownership.confirm(&self.holder, self.epoch)? {
             Ok(ReplicateOutcome::Acknowledged)
         } else {
@@ -127,20 +157,27 @@ impl HostedNode {
     }
 
     /// Hydrate and bind: with no local store, restore the newest
-    /// surviving lineage; with no lineage, the local store seeds the
-    /// bucket. Both at once disagree about the truth and refuse — local
-    /// state on a hosted node is derived, never authoritative.
+    /// surviving lineage — `SQLite` and engine stores from that one
+    /// lineage; with no lineage, the local store seeds the bucket. Both
+    /// at once disagree about the truth and refuse — local state on a
+    /// hosted node is derived, never authoritative.
     fn activate(
         ownership: Ownership,
         holder: &str,
         epoch: u64,
         paths: &NodePaths,
     ) -> Result<HostedNode, HostedError> {
-        let lineage = newest_lineage(&paths.replica_root, epoch)?;
+        let lineage = stores::newest_heads(&ownership, epoch)?;
         match (paths.store.exists(), lineage) {
             (true, None) => {}
-            (false, Some(prior)) => {
-                restore_to(&lineage_dir(&paths.replica_root, prior), &paths.store, None)?;
+            (false, Some((prior, heads))) => {
+                if let Some(parent) = paths.store.parent() {
+                    fs::create_dir_all(parent).map_err(crate::hosted_err)?;
+                }
+                paths
+                    .replica
+                    .restore(prior, &paths.store, rustyriver::TXID(heads.txid))?;
+                stores::hydrate(&paths.root, &ownership, &heads)?;
             }
             (true, Some(_)) => {
                 return Err(HostedError(
@@ -154,36 +191,21 @@ impl HostedNode {
                 ));
             }
         }
-        let own = lineage_dir(&paths.replica_root, epoch);
-        if latest_txid(&own)?.is_some() {
+        if paths.replica.latest_txid(epoch)?.is_some() {
             return Err(HostedError(format!(
                 "epoch {epoch} already has a lineage; the replica area and the record disagree"
             )));
         }
-        let replica = StoreReplica::open(&paths.store, &own)?;
+        let replica = paths.replica.replicate(&paths.store, epoch)?;
+        let objects = ownership.objects()?;
         Ok(HostedNode {
             ownership,
             replica,
+            area: paths.replica.clone(),
             holder: holder.to_owned(),
             epoch,
+            root: paths.root.clone(),
+            objects,
         })
     }
-}
-
-/// The newest epoch below `epoch` whose lineage holds a transaction —
-/// where a hydration restores from. An activation that died before its
-/// first capture leaves no lineage and is skipped.
-fn newest_lineage(replica_root: &Path, epoch: u64) -> Result<Option<u64>, HostedError> {
-    for prior in (1..epoch).rev() {
-        if latest_txid(&lineage_dir(replica_root, prior))?.is_some() {
-            return Ok(Some(prior));
-        }
-    }
-    Ok(None)
-}
-
-/// A lineage's directory in the replica area — the file-side mirror of
-/// the ownership plane's `ltx/e<epoch>/` key prefix.
-fn lineage_dir(replica_root: &Path, epoch: u64) -> PathBuf {
-    replica_root.join(format!("e{epoch}"))
 }

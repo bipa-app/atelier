@@ -7,6 +7,7 @@
 //! holder but keeps the record: the epoch is a high-water mark no
 //! activation ever reuses.
 
+use std::collections::BTreeSet;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 
@@ -15,7 +16,6 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
-use url::Url;
 
 use crate::{HostedError, hosted_err};
 
@@ -67,16 +67,6 @@ pub struct Ownership {
 }
 
 impl Ownership {
-    /// Open the workspace prefix at `url` (s3://, gs://, az://).
-    /// Credentials come from the environment. The ownership record needs
-    /// conditional writes: `LocalFileSystem` does not implement them, so
-    /// file:// refuses here — tests share an in-memory store instead.
-    pub fn open(url: &str) -> Result<Self, HostedError> {
-        let url = Url::parse(url).map_err(hosted_err)?;
-        let (store, prefix) = object_store::parse_url(&url).map_err(hosted_err)?;
-        Self::from_store(Arc::from(store), prefix)
-    }
-
     /// Open the ownership plane over an already-built store — the shape a
     /// hosted node uses when it shares one store across workspaces.
     pub fn from_store(
@@ -179,6 +169,65 @@ impl Ownership {
         Ok(())
     }
 
+    /// One key under `epoch`'s lineage, if a pass wrote it.
+    pub fn get_under_epoch(&self, epoch: u64, key: &str) -> Result<Option<Vec<u8>>, HostedError> {
+        let location = self.epoch_path(epoch, key);
+        self.runtime.block_on(async {
+            match self.store.get(&location).await {
+                Ok(result) => Ok(Some(result.bytes().await.map_err(hosted_err)?.to_vec())),
+                Err(object_store::Error::NotFound { .. }) => Ok(None),
+                Err(error) => Err(hosted_err(error)),
+            }
+        })
+    }
+
+    /// A content-addressed blob write under the workspace's shared
+    /// `objects/` prefix: the key is the content id, so every epoch's
+    /// manifest can name it and a re-upload is a no-op by construction.
+    pub fn put_object(&self, content_id: &str, bytes: Vec<u8>) -> Result<(), HostedError> {
+        let location = self.object_path(content_id);
+        self.runtime
+            .block_on(
+                self.store
+                    .put(&location, PutPayload::from_bytes(bytes.into())),
+            )
+            .map_err(hosted_err)?;
+        Ok(())
+    }
+
+    /// A content-addressed blob a manifest promised. Absence is an error:
+    /// manifests are written after their blobs, so a missing one means
+    /// the bucket lost data.
+    pub fn get_object(&self, content_id: &str) -> Result<Vec<u8>, HostedError> {
+        let location = self.object_path(content_id);
+        self.runtime.block_on(async {
+            match self.store.get(&location).await {
+                Ok(result) => Ok(result.bytes().await.map_err(hosted_err)?.to_vec()),
+                Err(object_store::Error::NotFound { .. }) => Err(HostedError(format!(
+                    "the bucket lost object {content_id}: a manifest names it"
+                ))),
+                Err(error) => Err(hosted_err(error)),
+            }
+        })
+    }
+
+    /// Every content id under the shared `objects/` prefix — what uploads
+    /// dedupe against.
+    pub fn objects(&self) -> Result<BTreeSet<String>, HostedError> {
+        let prefix = ObjectPath::from(format!("{}/objects", self.prefix));
+        self.runtime.block_on(async {
+            let mut stream = self.store.list(Some(&prefix));
+            let mut ids = BTreeSet::new();
+            while let Some(meta) = stream.next().await {
+                let meta = meta.map_err(hosted_err)?;
+                if let Some(id) = meta.location.filename() {
+                    ids.insert(id.to_owned());
+                }
+            }
+            Ok(ids)
+        })
+    }
+
     /// Every key under `epoch`'s lineage — what a restore of that lineage
     /// would consider, and nothing from any other epoch.
     pub fn keys_under_epoch(&self, epoch: u64) -> Result<Vec<String>, HostedError> {
@@ -198,6 +247,10 @@ impl Ownership {
     fn epoch_path(&self, epoch: u64, key: &str) -> ObjectPath {
         let lineage = format!("{}/ltx/e{epoch}/{key}", self.prefix);
         ObjectPath::from(lineage.trim_end_matches('/').to_owned())
+    }
+
+    fn object_path(&self, content_id: &str) -> ObjectPath {
+        ObjectPath::from(format!("{}/objects/{content_id}", self.prefix))
     }
 
     fn record_path(&self) -> ObjectPath {

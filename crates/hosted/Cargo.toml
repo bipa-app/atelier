@@ -1,9 +1,13 @@
 [package]
 name = "atelier-hosted"
 version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The hosted substrate: workspace replication, ownership, and failover over a bucket"
+readme = "../../README.md"
+keywords = ["replication", "sqlite", "workspace", "agents", "failover"]
+categories = ["development-tools", "database"]
 
 [dependencies]
 futures.workspace = true
@@ -11,7 +15,7 @@ object_store.workspace = true
 rustyriver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-url.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
