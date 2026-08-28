@@ -18,9 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+atelier-hosted = { version = "0.1.0", path = "../hosted" }
 atelier-sdk = { version = "0.1.0", path = "../core" }
 atelier-surface = { version = "0.1.0", path = "../surface" }
 clap.workspace = true
+ctrlc.workspace = true
 time.workspace = true
 tracing-subscriber.workspace = true
 

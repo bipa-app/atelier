@@ -1,8 +1,11 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use atelier_hosted::{HostedNode, NodeClaim, NodePaths, ReleaseOutcome, ReplicateOutcome};
 use atelier_sdk::{
     GateOutcome, JournalEntry, PullOutcome, RequestId, SessionId, SyncOutcome, WatchEvent,
     WatchStop, Workspace, printable, render_diff,
@@ -116,6 +119,18 @@ enum Command {
         /// beyond loopback.
         #[arg(long)]
         token: Option<String>,
+        /// Serve a hosted workspace (ADR-0013): claim the ownership
+        /// record at this S3-compatible bucket URL, hydrate the stores,
+        /// replicate while serving, release on shutdown.
+        #[arg(long)]
+        hosted: Option<String>,
+        /// Claim as this holder; the local user and process id otherwise.
+        #[arg(long)]
+        holder: Option<String>,
+        /// Seize the workspace from a holder that died without releasing;
+        /// a plain claim refuses while the record names another node.
+        #[arg(long)]
+        take_over: bool,
     },
 }
 
@@ -148,7 +163,19 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
             bind,
             allow_remote,
             token,
-        } => serve(mcp_stdio, http, &bind, allow_remote, token.as_deref()),
+            hosted,
+            holder,
+            take_over,
+        } => serve(&ServeArgs {
+            mcp_stdio,
+            http,
+            bind: &bind,
+            allow_remote,
+            token: token.as_deref(),
+            hosted: hosted.as_deref(),
+            holder: holder.as_deref(),
+            take_over,
+        }),
     }
 }
 
@@ -432,23 +459,129 @@ fn watch(debounce_ms: u64) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-fn serve(
+/// One `atelier serve` invocation, parsed — past seven flags, and several
+/// of them same-typed strings.
+struct ServeArgs<'a> {
     mcp_stdio: bool,
     http: bool,
-    bind: &str,
+    bind: &'a str,
     allow_remote: bool,
-    token: Option<&str>,
-) -> Result<Vec<String>> {
+    token: Option<&'a str>,
+    hosted: Option<&'a str>,
+    holder: Option<&'a str>,
+    take_over: bool,
+}
+
+fn serve(args: &ServeArgs) -> Result<Vec<String>> {
+    if args.hosted.is_none() && (args.holder.is_some() || args.take_over) {
+        bail!("--holder and --take-over belong to --hosted");
+    }
+    if let Some(url) = args.hosted {
+        if args.mcp_stdio || !args.http {
+            bail!("a hosted workspace serves the HTTP face: --hosted needs --http");
+        }
+        return serve_hosted(url, args);
+    }
     let root = env::current_dir().context("read the current directory")?;
-    match (mcp_stdio, http) {
+    match (args.mcp_stdio, args.http) {
         (true, false) => atelier_surface::serve_stdio(&root)?,
-        (false, true) => atelier_surface::serve_http(&root, bind, allow_remote, token)?,
+        (false, true) => {
+            atelier_surface::serve_http(&root, args.bind, args.allow_remote, args.token)?;
+        }
         (true, true) => {
             bail!("atelier serve speaks one transport per process: --mcp-stdio or --http")
         }
         (false, false) => bail!("atelier serve requires a transport: --mcp-stdio or --http"),
     }
     Ok(Vec::new())
+}
+
+/// How often a hosted node replicates while serving: batched, at its own
+/// pace (ADR-0013); the lag is the RPO for node loss.
+const REPLICATE_EVERY: Duration = Duration::from_secs(5);
+
+/// Claim, hydrate, serve, release (ADR-0013): the hosted half of
+/// `atelier serve`. A deposed node or a failed replication stops the
+/// server and surfaces on the error face — serving without a lineage
+/// behind it would promise durability the bucket does not hold.
+fn serve_hosted(url: &str, args: &ServeArgs) -> Result<Vec<String>> {
+    let root = env::current_dir().context("read the current directory")?;
+    let (ownership, replica) = atelier_hosted::open_planes(url)?;
+    let paths = NodePaths {
+        store: root.join(".atelier").join("journal.sqlite3"),
+        root: root.clone(),
+        replica,
+    };
+    let holder = match args.holder {
+        Some(name) => name.to_owned(),
+        None => default_holder(),
+    };
+    let claim = if args.take_over {
+        HostedNode::take_over(ownership, &holder, &paths)?
+    } else {
+        HostedNode::claim(ownership, &holder, &paths)?
+    };
+    let mut node = match claim {
+        NodeClaim::Serving(node) => *node,
+        NodeClaim::HeldByOther { holder, epoch } => bail!(
+            "the workspace is held by {holder} at epoch {epoch}; --take-over seizes it from a dead node"
+        ),
+    };
+    // Working copies rematerialize before the face opens; a workspace
+    // already whole on this machine opens as-is.
+    Workspace::rematerialize(&root)?;
+    println!("serving as {holder} at epoch {}", node.epoch());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
+        .context("install the shutdown handler")?;
+    let mut last = Instant::now();
+    let mut refusal = None;
+    atelier_surface::serve_http_until(&root, args.bind, args.allow_remote, args.token, || {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        if last.elapsed() < REPLICATE_EVERY {
+            return Ok(true);
+        }
+        match node.replicate() {
+            Ok(ReplicateOutcome::Acknowledged) => {
+                last = Instant::now();
+                Ok(true)
+            }
+            Ok(ReplicateOutcome::Deposed) => {
+                refusal = Some(
+                    "deposed: the record names another node; this node's writes land in a superseded lineage"
+                        .to_owned(),
+                );
+                Ok(false)
+            }
+            Err(error) => {
+                refusal = Some(format!("replication failed: {error}"));
+                Ok(false)
+            }
+        }
+    })?;
+    if let Some(reason) = refusal {
+        bail!(reason);
+    }
+    match node.release()? {
+        ReleaseOutcome::Released => Ok(vec!["released".to_owned()]),
+        ReleaseOutcome::NotHeld => Ok(vec![
+            "the workspace moved on; nothing to release".to_owned(),
+        ]),
+    }
+}
+
+/// This node's identity on the record when `--holder` is absent: the
+/// local user and process id — distinct per run; the epoch keeps even a
+/// colliding name from sharing a lineage.
+fn default_holder() -> String {
+    // No USER in the environment is a bare context, not a failure; the
+    // pid still distinguishes the holder.
+    let user = env::var("USER").unwrap_or_else(|_| "node".to_owned());
+    format!("{user}-{}", std::process::id())
 }
 
 /// The outcome as lines: one `landed …` per source (root lines keep the
