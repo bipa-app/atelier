@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use atelier_sdk::{Error, Workspace, render_diff};
 use serde_json::{Value, json};
@@ -30,6 +31,20 @@ pub fn serve_http(
     allow_remote: bool,
     token: Option<&str>,
 ) -> Result<(), Error> {
+    serve_http_until(root, bind, allow_remote, token, || Ok(true))
+}
+
+/// [`serve_http`] with a pulse: `tick` runs between requests, at least
+/// about once a second. `Ok(true)` keeps serving, `Ok(false)` stops the
+/// server cleanly, an error stops it with the error — the hosted face
+/// replicates and watches its shutdown flag there (ADR-0013).
+pub fn serve_http_until(
+    root: &Path,
+    bind: &str,
+    allow_remote: bool,
+    token: Option<&str>,
+    mut tick: impl FnMut() -> Result<bool, Error>,
+) -> Result<(), Error> {
     let address: SocketAddr = bind
         .parse()
         .map_err(|_| Error::Config(format!("bind address {bind:?} is not ip:port")))?;
@@ -53,7 +68,16 @@ pub fn serve_http(
     println!("listening on http://{listening}");
     let content_types = ContentTypes::new()?;
 
-    for mut request in server.incoming_requests() {
+    loop {
+        if !tick()? {
+            return Ok(());
+        }
+        let Some(mut request) = server
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(Error::Io)?
+        else {
+            continue;
+        };
         let reply = if authorized(&request, token) {
             reply(&mut workspace, &mut request, &content_types)
         } else {
@@ -67,7 +91,6 @@ pub fn serve_http(
         // server's: the loop serves the next request.
         let _ = request.respond(reply);
     }
-    Ok(())
 }
 
 /// The response headers, built once — `Header` parsing can only fail on

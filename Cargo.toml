@@ -20,6 +20,8 @@ anyhow = "1"
 thiserror = "2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
+# The hosted serve loop's shutdown seam: release on ctrl-c (ADR-0013).
+ctrlc = "3"
 tempfile = "3"
 # jj-lib's default `git` feature is required: workspaces are colocated git repos.
 jj-lib = "=0.44.0"

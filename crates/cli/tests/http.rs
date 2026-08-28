@@ -775,3 +775,49 @@ fn http_auth_refuses_without_the_token() {
     let stderr = String::from_utf8(refused.stderr).expect("stderr is utf-8");
     assert!(stderr.contains("requires --token"), "got: {stderr}");
 }
+
+#[test]
+fn hosted_serve_refuses_misuse_by_name() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = init_workspace(config_home.path());
+
+    // The hosted face is the HTTP face: no transport, wrong transport.
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--hosted", "s3://bucket/cells/ws1"])
+        .assert()
+        .failure()
+        .stderr("error: a hosted workspace serves the HTTP face: --hosted needs --http\n");
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--mcp-stdio", "--hosted", "s3://bucket/cells/ws1"])
+        .assert()
+        .failure()
+        .stderr("error: a hosted workspace serves the HTTP face: --hosted needs --http\n");
+
+    // The hosted-only flags refuse outside --hosted.
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--http", "--take-over"])
+        .assert()
+        .failure()
+        .stderr("error: --holder and --take-over belong to --hosted\n");
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--http", "--holder", "node-a"])
+        .assert()
+        .failure()
+        .stderr("error: --holder and --take-over belong to --hosted\n");
+
+    // The bucket URL must be s3-compatible and name the workspace prefix.
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--http", "--hosted", "gs://bucket/cells/ws1"])
+        .assert()
+        .failure()
+        .stderr(
+            "error: hosted workspaces speak s3-compatible bucket URLs; \
+             \"gs://bucket/cells/ws1\" does not\n",
+        );
+    ws(config_home.path(), workspace.path())
+        .args(["serve", "--http", "--hosted", "s3://bucket"])
+        .assert()
+        .failure()
+        .stderr("error: the bucket URL must name the workspace prefix (s3://bucket/<prefix>)\n");
+}

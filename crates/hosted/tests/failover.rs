@@ -1,13 +1,13 @@
-//! Claim, hydrate, serve, release (ADR-0013, H3): a node claims a
+//! Claim, hydrate, serve, release (ADR-0013, H3/H4): a node claims a
 //! workspace and replicates real work under its epoch; killed without a
 //! release, a second node takes over, hydrates from the surviving
-//! lineage, and serves every acknowledged act; a deposed node's
-//! replication surfaces refusal; a release hands the workspace to a
-//! plain claim. The ownership plane rides a shared in-memory store (the
-//! conditional writes real buckets grant); replication rides a
-//! file-backed replica area — one store for both planes waits on
-//! rustyriver speaking the record plane's `object_store` version (it
-//! pins 0.11; the plane speaks 0.14).
+//! lineage — the `SQLite` store and the jj/git stores from one completed
+//! pass — rematerializes working copies, and serves every acknowledged
+//! act; a deposed node's replication surfaces refusal; a release hands
+//! the workspace to a plain claim. The ownership plane rides a shared
+//! in-memory store (the conditional writes real buckets grant);
+//! replication rides a file-backed replica area — in production one
+//! bucket carries both planes through `open_planes`.
 
 use std::fs;
 use std::path::Path;
@@ -17,8 +17,8 @@ use atelier_hosted::object_store::ObjectStore;
 use atelier_hosted::object_store::memory::InMemory;
 use atelier_hosted::object_store::path::Path as ObjectPath;
 use atelier_hosted::{
-    HostedNode, NodeClaim, NodePaths, Ownership, OwnershipRecord, ReleaseOutcome, ReplicateOutcome,
-    latest_txid, restore_to,
+    HostedNode, NodeClaim, NodePaths, Ownership, OwnershipRecord, ReleaseOutcome, ReplicaArea,
+    ReplicateOutcome, latest_txid, restore_to,
 };
 use atelier_sdk::{Actor, ActorKind, GateOutcome, Instruction, Workspace};
 
@@ -133,6 +133,42 @@ fn serving(claim: NodeClaim) -> HostedNode {
     .expect("the activation must serve")
 }
 
+/// The canonical paths a node serves a real workspace at.
+fn workspace_paths(root: &Path, replica_root: &Path) -> NodePaths {
+    NodePaths {
+        store: root.join(".atelier").join("journal.sqlite3"),
+        root: root.to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.to_path_buf()),
+    }
+}
+
+/// A git repository fixture with two commits; the two ids, oldest first.
+fn git_repo(dir: &Path) -> Vec<String> {
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "upstream")
+            .env("GIT_AUTHOR_EMAIL", "upstream@example.com")
+            .env("GIT_COMMITTER_NAME", "upstream")
+            .env("GIT_COMMITTER_EMAIL", "upstream@example.com")
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).expect("git output is utf-8")
+    };
+    git(&["init", "-q", "-b", "master", "."]);
+    fs::write(dir.join("lib.rs"), "pub fn lib() {}\n").expect("write repo file");
+    git(&["add", "."]);
+    git(&["commit", "-qm", "the pre-attach commit"]);
+    let first = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fs::write(dir.join("README.md"), "readme\n").expect("write repo file");
+    git(&["add", "."]);
+    git(&["commit", "-qm", "second pre-attach commit"]);
+    let second = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    vec![first, second]
+}
+
 #[test]
 fn a_killed_owner_fails_over_whole() {
     let _guard = env_lock();
@@ -147,11 +183,8 @@ fn a_killed_owner_fails_over_whole() {
     let origin = tempfile::tempdir().unwrap();
     fs::write(origin.path().join("notes.txt"), "the note\n").unwrap();
     ws.attach(origin.path()).unwrap();
-    let store_a = root.path().join(".atelier").join("journal.sqlite3");
-    let paths_a = NodePaths {
-        store: store_a.clone(),
-        replica_root: replica_root.path().to_path_buf(),
-    };
+    let paths_a = workspace_paths(root.path(), replica_root.path());
+    let store_a = paths_a.store.clone();
     let mut node_a =
         serving(HostedNode::claim(handle(&bucket, &prefix), "node-a", &paths_a).unwrap());
     assert_eq!(node_a.epoch(), 1);
@@ -174,10 +207,7 @@ fn a_killed_owner_fails_over_whole() {
     // Node B seizes, hydrates from A's lineage, and serves every
     // acknowledged act row-for-row.
     let b_root = tempfile::tempdir().unwrap();
-    let paths_b = NodePaths {
-        store: b_root.path().join("journal.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
-    };
+    let paths_b = workspace_paths(b_root.path(), replica_root.path());
     let mut node_b =
         serving(HostedNode::take_over(handle(&bucket, &prefix), "node-b", &paths_b).unwrap());
     assert_eq!(node_b.epoch(), 2);
@@ -192,6 +222,19 @@ fn a_killed_owner_fails_over_whole() {
     assert!(
         acts.iter().any(|row| row.contains("land")),
         "the landing act survived the failover: {acts:?}"
+    );
+
+    // The workspace opens whole on B: working copies rematerialize from
+    // the hydrated stores, and the landed content is on disk.
+    let mut ws_b = Workspace::rematerialize(b_root.path()).unwrap();
+    assert_eq!(
+        fs::read_to_string(b_root.path().join("notes.txt")).unwrap(),
+        "the revised note\n"
+    );
+    let history = ws_b.log(50).unwrap();
+    assert!(
+        history.iter().any(|entry| entry.snapshot.actor == "scribe"),
+        "the landed snapshot survived: {history:?}"
     );
 
     // B replicates under its own epoch, and its lineage stands alone: a
@@ -216,13 +259,83 @@ fn a_killed_owner_fails_over_whole() {
 }
 
 #[test]
+fn a_git_mounted_workspace_survives_failover_whole() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let (bucket, prefix) = plane();
+    let replica_root = tempfile::tempdir().unwrap();
+
+    // A workspace with an adopted git repo and an open mid-flight session.
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let pre_attach = git_repo(repo.path());
+    ws.attach_mount(repo.path(), "sdk").unwrap();
+    let session = ws.open_session(&actor(), &instruction()).unwrap();
+    ws.session_write(session.id, "sdk/lib.rs", "pub fn lib() { work() }\n")
+        .unwrap();
+
+    let paths_a = workspace_paths(root.path(), replica_root.path());
+    let mut node_a =
+        serving(HostedNode::claim(handle(&bucket, &prefix), "node-a", &paths_a).unwrap());
+    assert_eq!(node_a.replicate().unwrap(), ReplicateOutcome::Acknowledged);
+    drop(node_a);
+    drop(ws);
+
+    // Another node seizes and loads the workspace from the bucket: the
+    // adopted history, the mount's working copy, and the open session all
+    // rematerialize.
+    let b_root = tempfile::tempdir().unwrap();
+    let paths_b = workspace_paths(b_root.path(), replica_root.path());
+    let node_b =
+        serving(HostedNode::take_over(handle(&bucket, &prefix), "node-b", &paths_b).unwrap());
+    let mut ws_b = Workspace::rematerialize(b_root.path()).unwrap();
+    assert_eq!(
+        fs::read_to_string(b_root.path().join("sdk").join("lib.rs")).unwrap(),
+        "pub fn lib() {}\n"
+    );
+
+    // The adopted history is intact for plain git in the hydrated mount.
+    let git_log = std::process::Command::new("git")
+        .args(["log", "--format=%H"])
+        .current_dir(b_root.path().join("sdk"))
+        .output()
+        .expect("run git log");
+    assert!(git_log.status.success(), "{git_log:?}");
+    let seen = String::from_utf8(git_log.stdout).expect("git log is utf-8");
+    assert!(
+        seen.contains(&pre_attach[0]) && seen.contains(&pre_attach[1]),
+        "git log lost the adopted history: {seen}"
+    );
+
+    // The session picks up exactly where it stood: its unlanded write is
+    // in its rematerialized working copy, and it lands on the new node.
+    let diff = ws_b.session_diff(session.id).unwrap();
+    assert!(
+        !diff.deltas.is_empty(),
+        "the session's unlanded work survived the failover"
+    );
+    let outcome = ws_b.land(session.id).unwrap();
+    assert!(matches!(outcome, GateOutcome::Landed { .. }), "{outcome:?}");
+    assert_eq!(
+        fs::read_to_string(b_root.path().join("sdk").join("lib.rs")).unwrap(),
+        "pub fn lib() { work() }\n"
+    );
+
+    // The landed history and the release both belong to B now.
+    assert_eq!(node_b.release().unwrap(), ReleaseOutcome::Released);
+}
+
+#[test]
 fn a_deposed_node_surfaces_refusal_and_keeps_writing() {
     let (bucket, prefix) = plane();
     let replica_root = tempfile::tempdir().unwrap();
     let a_root = tempfile::tempdir().unwrap();
     let paths_a = NodePaths {
         store: a_root.path().join("store.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
+        root: a_root.path().to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
     };
     seed_store(&paths_a.store);
     let mut node_a =
@@ -238,7 +351,8 @@ fn a_deposed_node_surfaces_refusal_and_keeps_writing() {
         "node-b",
         &NodePaths {
             store: a_root.path().join("unused.sqlite3"),
-            replica_root: replica_root.path().to_path_buf(),
+            root: a_root.path().to_path_buf(),
+            replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
         },
     )
     .unwrap();
@@ -274,7 +388,8 @@ fn a_release_hands_the_workspace_to_a_plain_claim() {
     let a_root = tempfile::tempdir().unwrap();
     let paths_a = NodePaths {
         store: a_root.path().join("store.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
+        root: a_root.path().to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
     };
     seed_store(&paths_a.store);
     let node_a = serving(HostedNode::claim(handle(&bucket, &prefix), "node-a", &paths_a).unwrap());
@@ -295,7 +410,8 @@ fn a_release_hands_the_workspace_to_a_plain_claim() {
     let b_root = tempfile::tempdir().unwrap();
     let paths_b = NodePaths {
         store: b_root.path().join("store.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
+        root: b_root.path().to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
     };
     let node_b = serving(HostedNode::claim(handle(&bucket, &prefix), "node-b", &paths_b).unwrap());
     assert_eq!(node_b.epoch(), 2);
@@ -316,7 +432,8 @@ fn an_activation_without_a_store_or_lineage_refuses() {
     let root = tempfile::tempdir().unwrap();
     let paths = NodePaths {
         store: root.path().join("absent.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
+        root: root.path().to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
     };
     let error = HostedNode::claim(handle(&bucket, &prefix), "node-a", &paths)
         .err()
@@ -334,7 +451,8 @@ fn a_local_store_never_shadows_a_lineage() {
     let a_root = tempfile::tempdir().unwrap();
     let paths_a = NodePaths {
         store: a_root.path().join("store.sqlite3"),
-        replica_root: replica_root.path().to_path_buf(),
+        root: a_root.path().to_path_buf(),
+        replica: ReplicaArea::Files(replica_root.path().to_path_buf()),
     };
     seed_store(&paths_a.store);
     let node_a = serving(HostedNode::claim(handle(&bucket, &prefix), "node-a", &paths_a).unwrap());

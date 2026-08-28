@@ -160,7 +160,27 @@ impl Workspace {
 
     /// Open the workspace already present at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let root = path.as_ref().to_path_buf();
+        Self::open_with(path.as_ref(), Engine::open)
+    }
+
+    /// Open the workspace at `path`, rebuilding every working copy a
+    /// hydration left absent: the root's, each mount's, and every open
+    /// session's, each checked out from its recorded commit — working
+    /// copies are derived state that rematerializes from history
+    /// (ADR-0013).
+    pub fn rematerialize(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let mut workspace = Self::open_with(path.as_ref(), source_engine)?;
+        workspace.rematerialize_sessions()?;
+        Ok(workspace)
+    }
+
+    /// The one open path both faces share: `engine_at` decides how each
+    /// source's engine comes up.
+    fn open_with(
+        root: &Path,
+        engine_at: fn(&Path, &Actor, &[String]) -> Result<Engine, Error>,
+    ) -> Result<Self, Error> {
+        let root = root.to_path_buf();
         let actor = resolve_actor()?;
 
         let control = root.join(CONTROL_DIR);
@@ -170,7 +190,7 @@ impl Workspace {
 
         let config = read_workspace_config(&control)?;
         let mount_names = mount_names(&config);
-        let engine = Engine::open(&root, &actor, &mount_names)?;
+        let engine = engine_at(&root, &actor, &mount_names)?;
         let mut mounts = Vec::new();
         for name in &mount_names {
             let branch = config
@@ -180,7 +200,7 @@ impl Workspace {
                 .and_then(|source| source.branch.clone());
             mounts.push(MountedSource {
                 name: name.clone(),
-                engine: Engine::open(&root.join(name), &actor, &[])?,
+                engine: engine_at(&root.join(name), &actor, &[])?,
                 branch,
             });
         }
@@ -196,6 +216,32 @@ impl Workspace {
             packages: builtin_packages(),
             projections: ProjectionCache::new(&control),
         })
+    }
+
+    /// Rebuild every open session's working copies where absent — one per
+    /// source, exactly the shape `open_session` created them in.
+    fn rematerialize_sessions(&mut self) -> Result<(), Error> {
+        for row in self.coordination.sessions()? {
+            if row.state != SessionState::Open {
+                continue;
+            }
+            let id = SessionId(row.id);
+            let name = format!("session-{id}");
+            let session_root = self.session_root(id);
+            if !session_root.join(".jj").exists() {
+                self.engine
+                    .rematerialize_session_workspace(&session_root, &name)?;
+            }
+            for index in 0..self.mounts.len() {
+                let mount_dir = session_root.join(&self.mounts[index].name);
+                if !mount_dir.join(".jj").exists() {
+                    self.mounts[index]
+                        .engine
+                        .rematerialize_session_workspace(&mount_dir, &name)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The actor this workspace handle acts as.
@@ -2112,6 +2158,17 @@ fn valid_mount_name(name: &str) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// The engine at `root`: opened when its working copy exists, else
+/// rematerialized from the restored store — a hydration ships stores,
+/// never working copies (ADR-0013).
+fn source_engine(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Engine, Error> {
+    if root.join(".jj").join("working_copy").exists() {
+        Engine::open(root, actor, boundary)
+    } else {
+        Engine::rematerialize(root, actor, boundary)
+    }
 }
 
 fn workspace_name(root: &Path) -> String {

@@ -74,7 +74,7 @@ ws.watch(debounce, on_event: FnMut(&WatchEvent), stop: &WatchStop)
 
 ### Coordination is a port (ADR-0008)
 
-The landing lease, request state, and journal writes go through one coordination port. Local implementation: SQLite (WAL) — atomic claim in a transaction, TTL column, correct across CLI + server processes. Hosted implementation later: a single-writer durable-object cell (celld / Cloudflare DO), one cell per workspace. No bespoke coordination, ever. Leases stay internal — `approve`/`land` acquire them; `status()` exposes them read-only.
+The landing lease, request state, and journal writes go through one coordination port. Local implementation: SQLite (WAL) — atomic claim in a transaction, TTL column, correct across CLI + server processes. Hosted serving keeps the same store on the owning node and replicates it to the workspace's bucket; single-writer per workspace is the ownership record's fencing epoch, not a second coordination system (ADR-0013). No bespoke coordination, ever. Leases stay internal — `approve`/`land` acquire them; `status()` exposes them read-only.
 
 ### Errors (typed; the contract includes failure)
 
@@ -149,9 +149,20 @@ requires `Authorization: Bearer <t>` on every request (both faces,
 constant-time compare). Binding beyond loopback requires `--allow-remote`
 **and** a token — the server refuses to start without one.
 
+`--hosted <bucket-url>` (H4, ADR-0013) serves a hosted workspace over the
+same face: claim the ownership record at the S3-compatible URL
+(`s3://bucket/<prefix>`, MinIO/R2 via `?endpoint=`; credentials from
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), hydrate the stores into the
+current directory when it is empty (a present workspace seeds a fresh
+bucket; both at once refuse), rematerialize working copies from history,
+replicate while serving, release on shutdown. A record naming another
+holder refuses by name; `--take-over` seizes from a dead node and
+supersedes its lineage. A deposed node stops serving and exits on its
+error face — its writes land in a lineage no restore selects.
+
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http]`
+`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]`
 
 The human review flow is the v1 demo: agent `request_land`s → human runs `atelier requests`, reads the docx diff as markdown, `atelier approve` → change lands.
 
