@@ -16,3 +16,6 @@ workspace = true
 tiny_http.workspace = true
 atelier-sdk = { version = "0.1.0", path = "../core" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -5,5 +5,5 @@
 mod http;
 mod mcp;
 
-pub use http::serve_http;
+pub use http::{serve_http, serve_http_until};
 pub use mcp::serve_stdio;
