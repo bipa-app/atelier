@@ -40,7 +40,7 @@ object_store = { version = "0.14", features = ["aws", "gcp", "azure"] }
 rustyriver = "0.1.0"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 url = "2.5"
-quick-xml = "0.41"
+quick-xml = "0.42"
 # deflate-flate2-zlib-rs reads and writes the one method Word uses (flate2 on
 # the zlib-rs backend); the blanket `deflate` feature would also pull in the
 # zopfli compressor, and bare `deflate-flate2` leaves flate2 with no backend.
