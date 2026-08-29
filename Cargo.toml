@@ -25,7 +25,7 @@ ctrlc = "3"
 tempfile = "3"
 # jj-lib's default `git` feature is required: workspaces are colocated git repos.
 jj-lib = "=0.44.0"
-pollster = "0.4"
+pollster = "1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 gix-hash = "0.25"
 # fs events only trigger snapshots; nothing from notify reaches an output path.
