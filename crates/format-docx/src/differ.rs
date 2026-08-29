@@ -106,60 +106,60 @@ impl BodySink for BlockWalk {
             return Ok(());
         }
         match name.as_ref() {
-            b"p" => self.paragraph = Some(Block::default()),
-            b"pPr" => self.in_paragraph_properties = true,
-            b"r" => self.run = RunProps::default(),
-            b"rPr" if !self.in_paragraph_properties => self.in_run_properties = true,
-            b"b" if self.in_run_properties => {
-                self.run.bold = on_off(attribute(reader, start, b"val")?.as_deref())?;
+            "p" => self.paragraph = Some(Block::default()),
+            "pPr" => self.in_paragraph_properties = true,
+            "r" => self.run = RunProps::default(),
+            "rPr" if !self.in_paragraph_properties => self.in_run_properties = true,
+            "b" if self.in_run_properties => {
+                self.run.bold = on_off(attribute(reader, start, "val")?.as_deref())?;
             }
-            b"i" if self.in_run_properties => {
-                self.run.italic = on_off(attribute(reader, start, b"val")?.as_deref())?;
+            "i" if self.in_run_properties => {
+                self.run.italic = on_off(attribute(reader, start, "val")?.as_deref())?;
             }
-            b"strike" if self.in_run_properties => {
-                self.run.strike = on_off(attribute(reader, start, b"val")?.as_deref())?;
+            "strike" if self.in_run_properties => {
+                self.run.strike = on_off(attribute(reader, start, "val")?.as_deref())?;
             }
-            b"u" if self.in_run_properties => {
-                let value = attribute(reader, start, b"val")?.ok_or_else(|| {
+            "u" if self.in_run_properties => {
+                let value = attribute(reader, start, "val")?.ok_or_else(|| {
                     DocxError::Structure("u without a val names no underline style".to_owned())
                 })?;
                 self.run.underline = (value != "none").then_some(value);
             }
-            b"sz" if self.in_run_properties => {
-                self.run.size = attribute(reader, start, b"val")?;
+            "sz" if self.in_run_properties => {
+                self.run.size = attribute(reader, start, "val")?;
             }
-            b"rFonts" if self.in_run_properties => {
-                self.run.family = attribute(reader, start, b"ascii")?;
+            "rFonts" if self.in_run_properties => {
+                self.run.family = attribute(reader, start, "ascii")?;
             }
-            b"color" if self.in_run_properties => {
-                self.run.color = attribute(reader, start, b"val")?;
+            "color" if self.in_run_properties => {
+                self.run.color = attribute(reader, start, "val")?;
             }
-            b"t" => self.in_text = true,
-            b"tab" if !self.in_paragraph_properties => self.append("\t"),
-            b"br" | b"cr" => self.append("\n"),
-            b"sym" if !self.in_paragraph_properties => {
-                let value = attribute(reader, start, b"char")?.ok_or_else(|| {
+            "t" => self.in_text = true,
+            "tab" if !self.in_paragraph_properties => self.append("\t"),
+            "br" | "cr" => self.append("\n"),
+            "sym" if !self.in_paragraph_properties => {
+                let value = attribute(reader, start, "char")?.ok_or_else(|| {
                     DocxError::Structure("sym without a char attribute".to_owned())
                 })?;
                 self.append(&sym_char(&value)?.to_string());
             }
-            b"noBreakHyphen" if !self.in_paragraph_properties => self.append("\u{2011}"),
-            b"softHyphen" if !self.in_paragraph_properties => self.append("\u{00ad}"),
+            "noBreakHyphen" if !self.in_paragraph_properties => self.append("\u{2011}"),
+            "softHyphen" if !self.in_paragraph_properties => self.append("\u{00ad}"),
             _ => {}
         }
         Ok(())
     }
 
-    fn close(&mut self, local_name: &[u8]) -> Result<(), DocxError> {
+    fn close(&mut self, local_name: &str) -> Result<(), DocxError> {
         if self.skipping > 0 {
             self.skipping -= 1;
             return Ok(());
         }
         match local_name {
-            b"pPr" => self.in_paragraph_properties = false,
-            b"rPr" => self.in_run_properties = false,
-            b"t" => self.in_text = false,
-            b"p" => {
+            "pPr" => self.in_paragraph_properties = false,
+            "rPr" => self.in_run_properties = false,
+            "t" => self.in_text = false,
+            "p" => {
                 let block = self.paragraph.take().ok_or_else(|| {
                     DocxError::Structure("paragraph end without a paragraph".to_owned())
                 })?;
