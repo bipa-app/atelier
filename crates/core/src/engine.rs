@@ -15,10 +15,11 @@ use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::{RefName, WorkspaceName, WorkspaceNameBuf};
-use jj_lib::repo::{ReadonlyRepo, Repo, RepoLoader};
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo, RepoLoader};
 use jj_lib::repo_path::RepoPath;
-use jj_lib::rewrite::rebase_commit;
+use jj_lib::rewrite::{merge_commit_trees, rebase_commit};
 use jj_lib::settings::UserSettings;
+use jj_lib::transaction::Transaction;
 use jj_lib::working_copy::{SnapshotOptions, WorkingCopy};
 use jj_lib::workspace::{LockedWorkspace, Workspace as JjWorkspace};
 use pollster::block_on;
@@ -39,6 +40,12 @@ const NEW_FILE_SIZE_MAX: u64 = 50 * 1024 * 1024;
 pub(crate) const LADDER_FILE_SIZE_MAX: u64 = 8 * 1024 * 1024;
 // The ladder only ever re-reads files a snapshot accepted.
 const _: () = assert!(LADDER_FILE_SIZE_MAX <= NEW_FILE_SIZE_MAX);
+
+/// The largest stretch of moved git history a fold scans for a commit
+/// carrying the line's exact tree; past it the fold falls back to a
+/// merge. Bounds the walk the way every input is bounded — out-of-band
+/// history is user-controlled.
+const FOLD_SCAN_MAX: usize = 1000;
 
 /// One immutable whole-workspace state in history, attributed to an actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,10 +104,22 @@ pub(crate) enum LandOutcome {
     Conflicted,
 }
 
-/// How a snapshot enters history: the shared line stacks a new commit per
-/// state; a session amends its one change so the change id survives.
+/// What one fold attempt did with a colocated git repo that moved out of
+/// band (an external commit, branch move, or push).
+pub(crate) enum GitFold {
+    /// Nothing moved beneath jj's view; the line stands.
+    Current,
+    /// The moved git state folded into the line; `head` is the line now.
+    Folded { head: String },
+}
+
+/// How a snapshot enters history: the shared line stacks a new commit
+/// per state; the fold's pre-snapshot stacks without moving git HEAD —
+/// an out-of-band move may have put HEAD exactly where the fold must
+/// read it; a session amends its one change so the change id survives.
 enum SnapshotStyle {
     Stack,
+    StackKeepHead,
     Amend,
 }
 
@@ -246,6 +265,174 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether the colocated git repo moved beneath jj's view — an
+    /// out-of-band commit, branch move, or push. The probe imports into
+    /// a transaction it drops; nothing changes.
+    pub fn git_moved(&self) -> Result<bool, Error> {
+        block_on(self.git_moved_async())
+    }
+
+    async fn git_moved_async(&self) -> Result<bool, Error> {
+        let mut tx = self.repo.start_transaction();
+        git::import_head(tx.repo_mut()).await.map_err(engine_err)?;
+        git::import_refs(tx.repo_mut(), &import_options())
+            .await
+            .map_err(engine_err)?;
+        Ok(tx.repo_mut().has_changes())
+    }
+
+    /// Fold an out-of-band git move into the line: import the moved
+    /// HEAD and refs, then put the working copy on the moved target —
+    /// `branch`'s when it names one, git HEAD's otherwise. A target
+    /// built on the line, carrying its exact tree, or carrying it
+    /// somewhere in the moved history (a rewrite with follow-up work)
+    /// becomes the line directly; other divergence merges through the
+    /// common ancestor into one fold state. A content conflict refuses
+    /// by name: the shared line never carries a conflicted state
+    /// (ADR-0007). Open sessions keep their fork points and merge at
+    /// landing, exactly as they do when another session lands first.
+    /// The caller holds the line's landing lease and snapshots first;
+    /// `fresh_snapshot` says that snapshot recorded new work, which the
+    /// history scan must never mistake for rewritten history — fresh
+    /// work merges, it is never superseded.
+    pub fn fold_git(&mut self, branch: &str, fresh_snapshot: bool) -> Result<GitFold, Error> {
+        block_on(self.fold_git_async(branch, fresh_snapshot))
+    }
+
+    async fn fold_git_async(
+        &mut self,
+        branch: &str,
+        fresh_snapshot: bool,
+    ) -> Result<GitFold, Error> {
+        let name = self.jj.workspace_name().to_owned();
+        let mut tx = self.repo.start_transaction();
+        git::import_head(tx.repo_mut()).await.map_err(engine_err)?;
+        git::import_refs(tx.repo_mut(), &import_options())
+            .await
+            .map_err(engine_err)?;
+        if !tx.repo_mut().has_changes() {
+            return Ok(GitFold::Current);
+        }
+        let target_id = line_target(&mut tx, branch);
+        let wc_id = self.wc_commit_id()?;
+        // Refs moved but the line's target did not leave it: absorb the
+        // imports so the next export speaks from git's current state.
+        let Some(target_id) = target_id else {
+            return self.absorb_refs(tx).await;
+        };
+        if target_id == wc_id {
+            return self.absorb_refs(tx).await;
+        }
+        let wc_commit = self.repo.store().get_commit(&wc_id).map_err(engine_err)?;
+        let target = self
+            .repo
+            .store()
+            .get_commit(&target_id)
+            .map_err(engine_err)?;
+        if wc_commit.parent_ids() == [target_id.clone()] {
+            return self.absorb_refs(tx).await;
+        }
+        let line = if is_ancestor(&tx, &wc_id, &target_id).await? {
+            // The move built on the line (a plain push of follow-up
+            // work): fast-forward, never replay the line's own diff.
+            target
+        } else if wc_commit.tree_ids() == target.tree_ids() {
+            // The moved tip carries the line's exact content (a
+            // recommit, a message rewrite, a conceded conflict): the
+            // moved commit IS the line now.
+            target
+        } else if !fresh_snapshot && self.line_content_in(&tx, &wc_commit, &target_id).await? {
+            // The moved history carries the line's exact content with
+            // follow-up work on top: the moved tip supersedes the line
+            // whole. Never taken for freshly snapshotted work — an old
+            // tree match must not discard what the disk just said.
+            target
+        } else {
+            let merged = merge_commit_trees(tx.repo(), &[wc_commit, target])
+                .await
+                .map_err(engine_err)?;
+            if merged.has_conflict() {
+                return Err(Error::GitFoldConflicted {
+                    branch: branch.to_owned(),
+                });
+            }
+            tx.repo_mut()
+                .new_commit(vec![target_id], merged)
+                .set_description("fold")
+                .write()
+                .await
+                .map_err(engine_err)?
+        };
+        tx.repo_mut()
+            .set_wc_commit(name, line.id().clone())
+            .map_err(engine_err)?;
+        git::reset_head(tx.repo_mut(), &line)
+            .await
+            .map_err(engine_err)?;
+        let repo = tx.commit("fold git").await.map_err(engine_err)?;
+        self.repo = repo;
+        self.jj
+            .check_out(self.repo.op_id().clone(), None, &line)
+            .await
+            .map_err(engine_err)?;
+        Ok(GitFold::Folded {
+            head: line.id().hex(),
+        })
+    }
+
+    /// Keep imported refs without moving the line, as the fold's
+    /// no-movement outcome.
+    async fn absorb_refs(&mut self, tx: Transaction) -> Result<GitFold, Error> {
+        self.repo = tx.commit("fold git refs").await.map_err(engine_err)?;
+        Ok(GitFold::Current)
+    }
+
+    /// Whether the moved history between `target` and its merge base
+    /// with the line holds a commit carrying the line's exact tree —
+    /// the line survives a history rewrite whole, so its own diff must
+    /// not be replayed against it. Pre-divergence history never counts:
+    /// any commit inside the merge bases' own ancestry is pruned, so an
+    /// ancient tree that merely resembles today's line cannot
+    /// fast-forward away current work. The scan walks an explicit
+    /// stack, bounded by [`FOLD_SCAN_MAX`]; past the cap the fold falls
+    /// back to a merge.
+    async fn line_content_in(
+        &self,
+        tx: &Transaction,
+        wc_commit: &jj_lib::commit::Commit,
+        target_id: &CommitId,
+    ) -> Result<bool, Error> {
+        let bases = tx
+            .repo()
+            .index()
+            .common_ancestors(
+                std::slice::from_ref(wc_commit.id()),
+                std::slice::from_ref(target_id),
+            )
+            .map_err(engine_err)?;
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![target_id.clone()];
+        'walk: while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if seen.len() > FOLD_SCAN_MAX {
+                return Ok(false);
+            }
+            for base in &bases {
+                if is_ancestor(tx, &id, base).await? {
+                    continue 'walk;
+                }
+            }
+            let commit = self.repo.store().get_commit(&id).map_err(engine_err)?;
+            if commit.tree_ids() == wc_commit.tree_ids() {
+                return Ok(true);
+            }
+            pending.extend(commit.parent_ids().iter().cloned());
+        }
+        Ok(false)
+    }
+
     /// Adopt the git repository already at `root`: jj on the existing git
     /// store, its history preserved, HEAD's tree checked out as the
     /// working copy's parent — the repo stays a real repo plain git
@@ -265,12 +452,7 @@ impl Engine {
             .map_err(engine_err)?;
         let mut tx = repo.start_transaction();
         git::import_head(tx.repo_mut()).await.map_err(engine_err)?;
-        let options = GitImportOptions {
-            abandon_unreachable_commits: false,
-            record_synthetic_predecessors: false,
-            remote_auto_track_bookmarks: std::collections::HashMap::new(),
-        };
-        git::import_refs(tx.repo_mut(), &options)
+        git::import_refs(tx.repo_mut(), &import_options())
             .await
             .map_err(engine_err)?;
         let head = tx.repo_mut().view().git_head().as_normal().cloned();
@@ -331,6 +513,14 @@ impl Engine {
         block_on(self.snapshot_with(&SnapshotStyle::Stack))
     }
 
+    /// Snapshot outstanding edits like [`Engine::snapshot`], but leave
+    /// the colocated git HEAD alone: the fold that follows reads the
+    /// out-of-band HEAD as a possible target, and resetting it here
+    /// would erase the move (or refuse against it) before the import.
+    pub fn snapshot_keep_head(&mut self) -> Result<Option<String>, Error> {
+        block_on(self.snapshot_with(&SnapshotStyle::StackKeepHead))
+    }
+
     /// Snapshot outstanding edits by amending this workspace's commit: the
     /// session's change id survives while its tree advances.
     pub fn snapshot_amend(&mut self) -> Result<Option<String>, Error> {
@@ -373,25 +563,8 @@ impl Engine {
 
         let mut tx = self.repo.start_transaction();
         tx.set_is_snapshot(true);
-        let new_commit = match style {
-            // A stack snapshot becomes a landed change's ancestor on the
-            // pushed branch; it names itself so `git log` never reads a
-            // blank. An amend keeps the session change's own description.
-            SnapshotStyle::Stack => tx
-                .repo_mut()
-                .new_commit(vec![wc_id], new_tree)
-                .set_description("snapshot")
-                .write()
-                .await
-                .map_err(engine_err)?,
-            SnapshotStyle::Amend => tx
-                .repo_mut()
-                .rewrite_commit(&wc_commit)
-                .set_tree(new_tree)
-                .write()
-                .await
-                .map_err(engine_err)?,
-        };
+        let new_commit =
+            Self::write_snapshot_commit(tx.repo_mut(), style, wc_id, &wc_commit, new_tree).await?;
         let new_id = new_commit.id().clone();
         tx.repo_mut()
             .set_wc_commit(name, new_id.clone())
@@ -400,14 +573,16 @@ impl Engine {
             .rebase_descendants()
             .await
             .map_err(engine_err)?;
-        // The Stack style moves a shared line: keep the colocated git
-        // HEAD on it, so plain git sees what jj wrote (PRD story 14). The
-        // Amend style is a session's — sessions share the root's git repo
-        // and must not steal its HEAD.
-        if let SnapshotStyle::Stack = style {
-            git::reset_head(tx.repo_mut(), &new_commit)
-                .await
-                .map_err(engine_err)?;
+        // Stack moves a shared line: keep the colocated git HEAD on it so
+        // plain git sees what jj wrote. The fold's pre-snapshot leaves
+        // HEAD to the fold; Amend is a session's and never steals HEAD.
+        match style {
+            SnapshotStyle::Stack => {
+                git::reset_head(tx.repo_mut(), &new_commit)
+                    .await
+                    .map_err(engine_err)?;
+            }
+            SnapshotStyle::StackKeepHead | SnapshotStyle::Amend => {}
         }
         let repo = tx.commit("snapshot").await.map_err(engine_err)?;
         locked
@@ -416,6 +591,33 @@ impl Engine {
             .map_err(engine_err)?;
         self.repo = repo;
         Ok(Some(new_id.hex()))
+    }
+
+    /// Write the commit a snapshot style records: a stack state on the
+    /// line, or a session change's amend. A stack state names itself so
+    /// `git log` never reads a blank; an amend keeps the change's own
+    /// description.
+    async fn write_snapshot_commit(
+        repo: &mut MutableRepo,
+        style: &SnapshotStyle,
+        wc_id: CommitId,
+        wc_commit: &jj_lib::commit::Commit,
+        new_tree: MergedTree,
+    ) -> Result<jj_lib::commit::Commit, Error> {
+        match style {
+            SnapshotStyle::Stack | SnapshotStyle::StackKeepHead => repo
+                .new_commit(vec![wc_id], new_tree)
+                .set_description("snapshot")
+                .write()
+                .await
+                .map_err(engine_err),
+            SnapshotStyle::Amend => repo
+                .rewrite_commit(wc_commit)
+                .set_tree(new_tree)
+                .write()
+                .await
+                .map_err(engine_err),
+        }
     }
 
     /// The ancestor chain of the working-copy commit, newest first.
@@ -948,6 +1150,46 @@ fn snapshot_options(base_ignores: Arc<GitIgnoreFile>) -> SnapshotOptions<'static
         start_tracking_matcher: &EverythingMatcher,
         force_tracking_matcher: &NothingMatcher,
         max_new_file_size: NEW_FILE_SIZE_MAX,
+    }
+}
+
+/// The commit an out-of-band move put the line's target on: `branch`'s
+/// when it names one, git HEAD's otherwise.
+fn line_target(tx: &mut Transaction, branch: &str) -> Option<CommitId> {
+    match tx
+        .repo_mut()
+        .view()
+        .get_local_bookmark(RefName::new(branch))
+        .as_normal()
+        .cloned()
+    {
+        Some(id) => Some(id),
+        None => tx.repo_mut().view().git_head().as_normal().cloned(),
+    }
+}
+
+/// Whether the imported `descendant` builds on `ancestor`, judged by the
+/// transaction's index, which already carries the imported commits.
+async fn is_ancestor(
+    tx: &Transaction,
+    ancestor: &CommitId,
+    descendant: &CommitId,
+) -> Result<bool, Error> {
+    tx.repo()
+        .index()
+        .is_ancestor(ancestor, descendant)
+        .await
+        .map_err(engine_err)
+}
+
+/// How atelier imports git refs: adopted history stays reachable, no
+/// remote bookmarks auto-track — mounts publish with plain `git push`,
+/// never through jj's remote machinery.
+fn import_options() -> GitImportOptions {
+    GitImportOptions {
+        abandon_unreachable_commits: false,
+        record_synthetic_predecessors: false,
+        remote_auto_track_bookmarks: std::collections::HashMap::new(),
     }
 }
 

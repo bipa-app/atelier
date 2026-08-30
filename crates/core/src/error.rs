@@ -27,6 +27,17 @@ pub enum Error {
     )]
     GitRepositoryExists(PathBuf),
 
+    /// A colocated git repo moved out of band and the moved content
+    /// conflicts with the line; the fold refused — the shared line never
+    /// carries a conflicted state.
+    #[error(
+        "the git branch {branch:?} moved out of band and its changes conflict with the line; make the working copy agree with the branch (or move the branch), then retry"
+    )]
+    GitFoldConflicted {
+        /// The branch whose out-of-band move conflicts.
+        branch: String,
+    },
+
     /// `attach` refused: the mount name is already taken.
     #[error("a source is already attached to this workspace")]
     AlreadyAttached,

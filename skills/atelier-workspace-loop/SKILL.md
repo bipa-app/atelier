@@ -131,10 +131,12 @@ adopted branch (or the `atelier` bookmark), so publishing is plain git:
 ## Rules
 
 - Never edit the workspace's shared files outside a session.
-- Never run mutating git commands (`checkout`, `commit`, `rebase`, `reset`)
-  inside a mount: the engine's store is colocated there, and foreign git ops
-  can track or delete it, destroying the workspace. Plain `git push` from a
-  mount is the one safe git verb — it is how landings publish.
+- Prefer atelier verbs over git inside a mount; plain `git push` from a
+  mount is the blessed git verb — it is how landings publish. An
+  out-of-band commit, branch move, or push that does land in a mount
+  folds into the line on the next atelier command (journaled as a pull);
+  when the moved content conflicts with the line, atelier refuses by
+  name — make the working copy agree with the branch, then retry.
 - Never fabricate instruction summaries — they are the attribution record.
 - `atelier journal` / `atelier history` / `atelier requests` answer "who did
   what", "what changed", "what awaits a gate" — prefer them over guessing.
