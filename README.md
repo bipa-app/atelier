@@ -64,6 +64,7 @@ From there:
 
 - `atelier watch` — external edits (Finder, any editor) become attributed snapshots within seconds.
 - `atelier attach <folder>` — bind an existing folder as the workspace's source.
+- `atelier session open --summary "…"` — print a long-lived session id and working-copy path; edit there with normal tools, inspect with `atelier session diff <id>`, then `atelier land <id>` or `atelier session abandon <id>`.
 - `atelier serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
 - `atelier sessions` / `atelier requests` / `atelier approve <id>` — review and land an agent's change.
 

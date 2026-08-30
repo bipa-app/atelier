@@ -31,6 +31,21 @@ journal                       who did what, attributed, always
 Editing never takes a lease; landing always passes the gate. A parked landing is a
 value, not an error: resolve in the session and approve again — what landed stands.
 
+## Long-lived CLI sessions
+
+```sh
+atelier session open --summary "wire the retry path"
+# Edit the printed working-copy path with an editor or agent file tools.
+atelier session diff s1
+atelier land s1                    # or: atelier session abandon s1
+```
+
+`session open` exits after printing the durable session id and working-copy
+path. The editor or agent can come and go. `session diff`, `land`, and
+`session abandon` each snapshot outstanding edits before reviewing or moving
+the session. The diff reviews that same change; abandon closes it without
+landing.
+
 ## The deepest integration is no integration: `atelier run`
 
 ```sh
