@@ -288,6 +288,9 @@ impl Engine {
                     .repo_mut()
                     .new_commit(vec![head_id], head.tree())
                     .set_author(signature(actor))
+                    // The continuation lands beneath the first landed
+                    // change; `git log` must not read it as a blank.
+                    .set_description("adopt")
                     .write()
                     .await
                     .map_err(engine_err)?;
@@ -371,9 +374,13 @@ impl Engine {
         let mut tx = self.repo.start_transaction();
         tx.set_is_snapshot(true);
         let new_commit = match style {
+            // A stack snapshot becomes a landed change's ancestor on the
+            // pushed branch; it names itself so `git log` never reads a
+            // blank. An amend keeps the session change's own description.
             SnapshotStyle::Stack => tx
                 .repo_mut()
                 .new_commit(vec![wc_id], new_tree)
+                .set_description("snapshot")
                 .write()
                 .await
                 .map_err(engine_err)?,
@@ -464,15 +471,17 @@ impl Engine {
     }
 
     /// Create a session's own jj workspace at `root`: a working copy of the
-    /// shared head and a fresh change there, authored by `actor`. The new
-    /// change's id.
+    /// shared head and a fresh change there, authored by `actor` and
+    /// described by `description` — the landed git commit's message. The
+    /// new change's id.
     pub fn create_session_workspace(
         &mut self,
         root: &Path,
         name: &str,
         actor: &Actor,
+        description: &str,
     ) -> Result<String, Error> {
-        block_on(self.create_session_workspace_async(root, name, actor))
+        block_on(self.create_session_workspace_async(root, name, actor, description))
     }
 
     async fn create_session_workspace_async(
@@ -480,6 +489,7 @@ impl Engine {
         root: &Path,
         name: &str,
         actor: &Actor,
+        description: &str,
     ) -> Result<String, Error> {
         let head_id = self.wc_commit_id()?;
         let head = self.repo.store().get_commit(&head_id).map_err(engine_err)?;
@@ -498,6 +508,7 @@ impl Engine {
             .repo_mut()
             .new_commit(vec![head_id], head.tree())
             .set_author(signature(actor))
+            .set_description(description)
             .write()
             .await
             .map_err(engine_err)?;

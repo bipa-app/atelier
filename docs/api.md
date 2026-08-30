@@ -208,6 +208,7 @@ Schema versioning from day one: `schema = 1`; SQLite `user_version` for the jour
 - **Concurrent applies** → one lease holder (SQLite claim); loser sees `LeaseHeld { holder, expires }` and retries. Requests queue naturally as open objects — only the apply serializes.
 - **Approve a parked request** → refused; resolve the conflict (follow-up session), new snapshot re-opens the gate.
 - **Crash mid-session / mid-apply** → sessions and requests are durable rows + real directories; `atelier sessions` / `atelier requests` list them; lease TTL frees a dead holder; nothing is auto-deleted.
+- **Landed commit messages** → a landed commit's git message is the session's instruction summary with an `Atelier-Session: <id>` trailer; stack snapshots and adoption continuations name themselves (`snapshot`, `adopt`). No branch commit atelier writes is blank.
 
 ### Snapshots, boundary & watch
 - **Huge file** → `FileTooLarge` skip, journaled, path listed outside-boundary until config raises the limit; the rest of the snapshot proceeds.

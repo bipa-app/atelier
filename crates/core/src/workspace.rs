@@ -677,10 +677,14 @@ impl Workspace {
             now_ms()?,
         )?;
         let id = SessionId(row);
+        // The change's description is what a landed git commit says:
+        // the honest one-line summary, plus the session as a trailer.
+        let description = format!("{}\n\nAtelier-Session: {id}\n", instruction.summary);
         let change_id = match self.engine.create_session_workspace(
             &self.session_root(id),
             &format!("session-{id}"),
             actor,
+            &description,
         ) {
             Ok(change_id) => change_id,
             Err(error) => {
@@ -698,6 +702,7 @@ impl Workspace {
                 &session_root.join(&name),
                 &format!("session-{id}"),
                 actor,
+                &description,
             ) {
                 Ok(change_id) => change_id,
                 Err(error) => {
