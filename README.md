@@ -27,13 +27,17 @@ Status: pre-alpha, under active design.
 curl -fsSL https://atelier-ws.dev/install.sh | sh   # prebuilt binary (mac/linux)
 ```
 
+The script installs to `~/.cargo/bin` and puts it on PATH for sh, bash, zsh,
+and fish (`~/.profile`, `~/.zshrc`, fish's `conf.d`); open a new shell after
+the first install. Any other shell: add `~/.cargo/bin` to PATH.
+
 Or with a Rust toolchain: `cargo install atelier-ws` (from crates.io) or
 `cargo install --git https://github.com/bipa-app/atelier atelier-ws` (from main).
 Each installs the `atelier` binary.
 
-The installer also places `atelier-ws-update`: run it any time to move an
-existing install to the latest release. Re-running the install script does
-the same.
+Update a script install any time with `atelier update` (it runs the bundled
+updater the installer places beside the binary); re-running the install
+script does the same. Cargo installs update with `cargo install atelier-ws`.
 
 ## Quickstart
 

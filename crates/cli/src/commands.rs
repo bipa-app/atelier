@@ -93,6 +93,9 @@ enum Command {
         #[arg(long, default_value_t = 500)]
         debounce_ms: u64,
     },
+    /// Update this install to the latest release: runs the bundled
+    /// updater the install script places beside the binary.
+    Update,
     /// Open a session and run a command inside its working copy: every
     /// edit the command makes is versioned, attributed, and ready to land.
     Run {
@@ -176,6 +179,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Pull { source } => pull(source.as_deref()),
         Command::Sync { source, force } => sync(source.as_deref(), force),
         Command::Watch { debounce_ms } => watch(debounce_ms),
+        Command::Update => update(),
         Command::Run {
             summary,
             land,
@@ -215,6 +219,29 @@ fn init(path: Option<PathBuf>) -> Result<Vec<String>> {
         workspace_name(&path),
         path.display()
     )])
+}
+
+/// The updater is `atelier-ws-update` (cargo-dist names it after the
+/// package, and bare `atelier` is taken on crates.io); this verb is the
+/// spelling people expect. It updates the tool, not a workspace, so it
+/// lives on the CLI alone — no MCP or HTTP form.
+fn update() -> Result<Vec<String>> {
+    let current = env::current_exe().context("locate this binary")?;
+    let updater = current.with_file_name("atelier-ws-update");
+    if !updater.exists() {
+        bail!(
+            "this install has no bundled updater; re-run the install script \
+             (curl -fsSL https://atelier-ws.dev/install.sh | sh) or, for cargo installs: \
+             cargo install atelier-ws --force"
+        );
+    }
+    let status = std::process::Command::new(&updater)
+        .status()
+        .with_context(|| format!("run {}", updater.display()))?;
+    if !status.success() {
+        bail!("the updater failed ({status})");
+    }
+    Ok(Vec::new())
 }
 
 fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
