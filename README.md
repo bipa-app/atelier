@@ -31,6 +31,10 @@ Or with a Rust toolchain: `cargo install atelier-ws` (from crates.io) or
 `cargo install --git https://github.com/bipa-app/atelier atelier-ws` (from main).
 Each installs the `atelier` binary.
 
+The installer also places `atelier-ws-update`: run it any time to move an
+existing install to the latest release. Re-running the install script does
+the same.
+
 ## Quickstart
 
 Build the `atelier` binary (the toolchain is pinned in `rust-toolchain.toml`):
@@ -74,7 +78,7 @@ Everything the CLI does, the `atelier-sdk` crate does directly:
 
 ```toml
 [dependencies]
-atelier-sdk = "0.1"
+atelier-sdk = "0.2"
 ```
 
 With the actor configured as above, a workspace, a session, one write, and
