@@ -778,3 +778,77 @@ fn a_landing_moves_the_branch_a_plain_push_carries() {
         sdk_landing.snapshot
     );
 }
+
+#[test]
+fn every_commit_atelier_writes_into_a_branch_carries_a_message() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    ws.attach_mount(repo.path(), "sdk").unwrap();
+
+    let git = |dir: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("git output is utf-8")
+            .trim()
+            .to_owned()
+    };
+    let sdk = root.path().join("sdk");
+
+    // An external edit becomes a stack snapshot beneath the landing.
+    fs::write(sdk.join("lib.rs"), "pub fn lib() { observe() }\n").unwrap();
+    ws.journal(1).unwrap();
+
+    // A landed change carries the session's instruction summary as its
+    // commit message, with the session as a trailer — on the adopted
+    // branch and on the root's fallback bookmark alike.
+    let actor = atelier_sdk::Actor {
+        name: "scribe".to_owned(),
+        kind: atelier_sdk::ActorKind::Agent,
+    };
+    let instruction = atelier_sdk::Instruction {
+        summary: "wire the retry path".to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = ws.open_session(&actor, &instruction).unwrap();
+    ws.session_write(session.id, "sdk/lib.rs", "pub fn lib() { retry() }\n")
+        .unwrap();
+    ws.session_write(session.id, "plan.md", "# retry\n")
+        .unwrap();
+    let outcome = ws.land(session.id).unwrap();
+    let atelier_sdk::GateOutcome::Landed { .. } = outcome else {
+        panic!("the land must land, got {outcome:?}");
+    };
+
+    // The pushed branch reads whole: the landed summary, then the
+    // snapshot and adoption continuations naming themselves, then the
+    // adopted history — no blank subjects anywhere.
+    assert_eq!(
+        git(&sdk, &["log", "--format=%s", "refs/heads/master"]),
+        "wire the retry path\nsnapshot\nadopt\nsecond pre-attach commit\nthe pre-attach commit"
+    );
+
+    let message = "wire the retry path\n\nAtelier-Session: s1";
+    assert_eq!(
+        git(&sdk, &["log", "-1", "--format=%B", "refs/heads/master"]),
+        message
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["log", "-1", "--format=%B", "refs/heads/atelier"]
+        ),
+        message
+    );
+}
