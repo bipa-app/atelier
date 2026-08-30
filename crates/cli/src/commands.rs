@@ -54,6 +54,11 @@ enum Command {
     History { source: Option<String> },
     /// Show every session, newest first.
     Sessions,
+    /// Open, inspect, or abandon a long-lived session.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Show every landing request, newest first.
     Requests,
     /// Approve a landing request; a satisfied gate lands the change.
@@ -134,6 +139,20 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Open a session and print its working copy for normal file tools.
+    Open {
+        /// One line on what this session is doing and why.
+        #[arg(long)]
+        summary: String,
+    },
+    /// Show a session's change against the shared line.
+    Diff { session: String },
+    /// Close a session without landing; its work stays in history.
+    Abandon { session: String },
+}
+
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
     match cli.command {
         Command::Init { path } => init(path),
@@ -144,6 +163,11 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Journal => journal(),
         Command::History { source } => history(source.as_deref()),
         Command::Sessions => sessions(),
+        Command::Session { command } => match command {
+            SessionCommand::Open { summary } => open_session(&summary),
+            SessionCommand::Diff { session } => session_diff(&session),
+            SessionCommand::Abandon { session } => abandon_session(&session),
+        },
         Command::Requests => requests(),
         Command::Approve { request } => approve(&request),
         Command::Reject { request, reason } => reject(&request, reason.as_deref()),
@@ -306,6 +330,39 @@ fn sessions() -> Result<Vec<String>> {
             ))
         })
         .collect())
+}
+
+fn open_session(summary: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let actor = workspace.actor().clone();
+    let instruction = atelier_sdk::Instruction {
+        summary: summary.to_owned(),
+        run_ref: None,
+        verbatim: None,
+    };
+    let session = workspace.open_session(&actor, &instruction)?;
+    Ok(vec![
+        format!("opened session {}", session.id),
+        format!("working copy {}", session.working_copy.display()),
+        format!("land with: atelier land {}", session.id),
+    ])
+}
+
+fn session_diff(session: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: SessionId = session.parse()?;
+    let diff = workspace.session_diff(id)?;
+    if diff.deltas.is_empty() {
+        return Ok(vec![format!("no changes in session {id}")]);
+    }
+    Ok(render_diff(&diff))
+}
+
+fn abandon_session(session: &str) -> Result<Vec<String>> {
+    let mut workspace = open_current()?;
+    let id: SessionId = session.parse()?;
+    let abandoned = workspace.abandon(id)?;
+    Ok(vec![format!("abandoned {}", abandoned.id)])
 }
 
 fn requests() -> Result<Vec<String>> {

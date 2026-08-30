@@ -75,6 +75,84 @@ fn run_carries_edits_into_a_session_not_the_shared_line() {
 }
 
 #[test]
+fn long_lived_session_supports_normal_tools_diff_and_land() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create temp workspace");
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+    let root = fs::canonicalize(workspace.path()).expect("canonicalize workspace");
+
+    let open = ws(config_home.path(), workspace.path())
+        .args(["session", "open", "--summary", "add the notes"])
+        .assert()
+        .success();
+    let working_copy = root.join(".atelier/sessions/s1");
+    assert_eq!(
+        stdout(&open),
+        format!(
+            "opened session s1\nworking copy {}\nland with: atelier land s1\n",
+            working_copy.display()
+        )
+    );
+
+    fs::write(working_copy.join("notes.txt"), "hello\n").expect("write through normal file tool");
+    let diff = ws(config_home.path(), workspace.path())
+        .args(["session", "diff", "s1"])
+        .assert()
+        .success();
+    assert_eq!(stdout(&diff), "A notes.txt\n");
+    assert!(!root.join("notes.txt").exists());
+
+    ws(config_home.path(), workspace.path())
+        .args(["land", "s1"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read landed file"),
+        "hello\n"
+    );
+}
+
+#[test]
+fn long_lived_session_can_be_abandoned_without_landing() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create temp workspace");
+    ws(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+    let root = fs::canonicalize(workspace.path()).expect("canonicalize workspace");
+
+    ws(config_home.path(), workspace.path())
+        .args(["session", "open", "--summary", "draft then stop"])
+        .assert()
+        .success();
+    let working_copy = root.join(".atelier/sessions/s1");
+    fs::write(working_copy.join("draft.txt"), "kept\n").expect("write session draft");
+
+    ws(config_home.path(), workspace.path())
+        .args(["session", "abandon", "s1"])
+        .assert()
+        .success()
+        .stdout("abandoned s1\n");
+    ws(config_home.path(), workspace.path())
+        .args(["session", "diff", "s1"])
+        .assert()
+        .failure()
+        .stderr("error: session s1 is abandoned\n");
+
+    assert!(!root.join("draft.txt").exists());
+    assert_eq!(
+        fs::read_to_string(working_copy.join("draft.txt")).expect("read retained draft"),
+        "kept\n"
+    );
+}
+
+#[test]
 fn run_land_lands_the_change_on_success() {
     let config_home = TempDir::new().expect("create config tempdir");
     write_actor_config(config_home.path());
