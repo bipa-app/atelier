@@ -11,7 +11,8 @@ containing `.atelier/` is a workspace: **never edit its files directly** — the
 shared line only moves through the landing gate, and a direct edit dodges the
 attribution record the whole product exists to keep. Work through a session.
 
-Install if `atelier` is not on PATH:
+Install if `atelier` is not on PATH (`atelier update` refreshes a script
+install later):
 
 ```sh
 curl -fsSL https://atelier-ws.dev/install.sh | sh   # or: cargo install atelier-ws

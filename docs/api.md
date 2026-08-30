@@ -162,12 +162,18 @@ error face — its writes land in a lineage no restore selects.
 
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]`
+`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]` · `atelier update`
 
 `session open` prints the session id and its working-copy path. Edit that path
 with normal tools over any process lifetime. Inspect it with `session diff`;
 `land` passes it through the gate, while `session abandon` closes it without
 landing.
+
+`update` moves this install to the latest release by running the bundled
+`atelier-ws-update` the install script places beside the binary; without one
+it refuses and names the install move. It updates the tool, not a workspace,
+so it is deliberately CLI-only — the one verb with no MCP or REST form
+(ADR-0006 governs workspace capability, not tool distribution).
 
 The human review flow is the v1 demo: agent `request_land`s → human runs `atelier requests`, reads the docx diff as markdown, `atelier approve` → change lands.
 

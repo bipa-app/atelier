@@ -31,9 +31,9 @@ Or with a Rust toolchain: `cargo install atelier-ws` (from crates.io) or
 `cargo install --git https://github.com/bipa-app/atelier atelier-ws` (from main).
 Each installs the `atelier` binary.
 
-The installer also places `atelier-ws-update`: run it any time to move an
-existing install to the latest release. Re-running the install script does
-the same.
+Update a script install any time with `atelier update` (it runs the bundled
+updater the installer places beside the binary); re-running the install
+script does the same. Cargo installs update with `cargo install atelier-ws`.
 
 ## Quickstart
 
