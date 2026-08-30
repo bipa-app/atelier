@@ -141,6 +141,28 @@ fn workspace_round_trip_works_through_the_cli() {
         );
 }
 
+#[test]
+fn init_in_git_repository_refuses_with_attach_instructions() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let repository = TempDir::new().expect("create repository tempdir");
+    fs::create_dir(repository.path().join(".git")).expect("create git metadata");
+    let root = canonical(repository.path());
+
+    command(config_home.path(), &root)
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(format!(
+            "error: cannot initialize a workspace at {root}: it is already a git repository; \
+             initialize a workspace elsewhere, then run: atelier attach {root} --mount <name>\n",
+            root = root.display()
+        ));
+
+    assert!(!root.join(".atelier").exists());
+    assert!(root.join(".git").exists());
+}
+
 const DOCX_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
 

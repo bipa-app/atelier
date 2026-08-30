@@ -133,6 +133,9 @@ impl Workspace {
         if let Some(ancestor) = enclosing_workspace(&root) {
             return Err(Error::NestedWorkspace(ancestor));
         }
+        if root.join(".git").exists() {
+            return Err(Error::GitRepositoryExists(root));
+        }
 
         fs::create_dir_all(&control)?;
         let engine = Engine::init(&root, &actor, &[])?;
