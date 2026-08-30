@@ -16,8 +16,8 @@ use atelier_sdk_docx::DocxPackage;
 use notify::{Event, RecursiveMode, Watcher};
 
 use crate::config::{
-    Actor, InstructionFidelity, ROOT_MOUNT, Source, SourceKind, SyncPolicy, WorkspaceConfig,
-    read_workspace_config, resolve_actor, write_workspace_config,
+    Actor, CONFIG_FILE, InstructionFidelity, ROOT_MOUNT, Source, SourceKind, SyncPolicy,
+    WorkspaceConfig, read_workspace_config, resolve_actor, write_workspace_config,
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
 use crate::engine::{
@@ -127,7 +127,7 @@ impl Workspace {
         let actor = resolve_actor()?;
 
         let control = root.join(CONTROL_DIR);
-        if control.exists() {
+        if workspace_marked(&control) {
             return Err(Error::WorkspaceExists(root));
         }
         if let Some(ancestor) = enclosing_workspace(&root) {
@@ -187,7 +187,7 @@ impl Workspace {
         let actor = resolve_actor()?;
 
         let control = root.join(CONTROL_DIR);
-        if !control.exists() {
+        if !workspace_marked(&control) {
             return Err(Error::NotAWorkspace(root));
         }
 
@@ -2181,10 +2181,17 @@ fn workspace_name(root: &Path) -> String {
     }
 }
 
+/// The config file, not the bare control directory, marks a workspace: a
+/// stranded empty `.atelier` (a crashed init, a stray mkdir) must neither
+/// open as a workspace nor block a fresh init from repairing it.
+fn workspace_marked(control: &Path) -> bool {
+    control.join(CONFIG_FILE).is_file()
+}
+
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     let mut current = root.parent();
     while let Some(dir) = current {
-        if dir.join(CONTROL_DIR).exists() {
+        if workspace_marked(&dir.join(CONTROL_DIR)) {
             return Some(dir.to_path_buf());
         }
         current = dir.parent();

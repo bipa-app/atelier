@@ -163,6 +163,64 @@ fn init_in_git_repository_refuses_with_attach_instructions() {
     assert!(root.join(".git").exists());
 }
 
+#[test]
+fn an_empty_control_marker_neither_opens_nor_blocks_init() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let stray = TempDir::new().expect("create stray tempdir");
+    fs::create_dir(stray.path().join(".atelier")).expect("create empty marker");
+    let root = canonical(stray.path());
+
+    // No config file, no workspace: reads refuse by name instead of the
+    // io error the raw marker used to produce.
+    command(config_home.path(), &root)
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(format!("error: not a workspace: {}\n", root.display()));
+
+    // The stray marker does not block a fresh init from repairing it.
+    command(config_home.path(), &root)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(format!(
+            "initialized workspace {} at {}\n",
+            root.file_name()
+                .expect("dir has a name")
+                .to_str()
+                .expect("utf-8 name"),
+            root.display()
+        ));
+    command(config_home.path(), &root)
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout("no sessions\n");
+}
+
+#[test]
+fn an_empty_control_marker_in_a_git_repository_teaches_the_attach_move() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let repository = TempDir::new().expect("create repository tempdir");
+    fs::create_dir(repository.path().join(".git")).expect("create git metadata");
+    fs::create_dir(repository.path().join(".atelier")).expect("create empty marker");
+    let root = canonical(repository.path());
+
+    // The stray marker no longer claims "a workspace already exists";
+    // the git refusal names the working setup instead.
+    command(config_home.path(), &root)
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(format!(
+            "error: cannot initialize a workspace at {root}: it is already a git repository; \
+             initialize a workspace elsewhere, then run: atelier attach {root} --mount <name>\n",
+            root = root.display()
+        ));
+}
+
 const DOCX_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
 
