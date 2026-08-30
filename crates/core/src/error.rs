@@ -21,6 +21,12 @@ pub enum Error {
     #[error("cannot nest a workspace inside the one at {0}")]
     NestedWorkspace(PathBuf),
 
+    /// `init` refused: the path already holds a git repository.
+    #[error(
+        "cannot initialize a workspace at {0}: it is already a git repository; initialize a workspace elsewhere, then run: atelier attach {0} --mount <name>"
+    )]
+    GitRepositoryExists(PathBuf),
+
     /// `attach` refused: the mount name is already taken.
     #[error("a source is already attached to this workspace")]
     AlreadyAttached,

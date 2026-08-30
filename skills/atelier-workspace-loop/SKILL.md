@@ -1,7 +1,7 @@
 ---
 name: atelier-workspace-loop
 description: Work inside an atelier workspace (versioned, attributed, gated) instead of editing files directly. Use whenever a directory contains .atelier/, whenever the user says "use atelier", "atelier workspace", "open a session", "land this", or asks who changed something and why — and whenever an agent's edits should be versioned, attributed, and reviewable, even if atelier is not named. Also covers setting up a workspace, serving it to agents (MCP, HTTP), and hosted serving from a bucket.
-version: 0.2.0
+version: 0.3.0
 ---
 
 # The atelier workspace loop
@@ -44,20 +44,30 @@ the session open with its work versioned — nothing is lost, nothing lands.
 
 ## The loop (MCP or CLI)
 
+For a long-lived CLI session whose working copy any normal file tool can edit:
+
+```sh
+atelier session open --summary "one honest line on what and why"
+# Edit the printed working-copy path.
+atelier session diff <session>
+atelier land <session>                 # or: atelier session abandon <session>
+```
+
 Serve MCP when driving as an agent: `atelier serve --mcp-stdio` (one client
 per process, cwd = workspace). Tools: `manifest`, `status`, `open_session`,
 `read`, `write`, `diff`, `request_land`, `approve`, `reject`, `land`,
 `landing_requests`, `journal`, `abandon`, `undo`, `sync`, `pull`. The CLI
-covers the read models and the gate verbs; `open_session`, `write`, and the
-session-scoped `read`/`diff` are MCP/HTTP-only — on the CLI, `atelier run`
-is how a session opens, and you edit its working copy with normal tools.
+opens long-lived sessions with `session open`, prints their working copies,
+and exposes `session diff`, `land`, and `session abandon`; session-scoped
+`read` and `write` remain MCP/HTTP-only.
 
 1. `manifest` — read first.
 2. `open_session` (actor_name, actor_kind: "agent", instruction_summary — one
    honest line on what and why; it becomes the journal's attribution).
-3. The response carries `working_copy` — a real directory. Either `write` over
-   MCP or edit files in that directory with normal tools; every atelier
-   command auto-snapshots outstanding edits, so there is no separate "commit".
+3. The response carries `working_copy` — a real directory. `write` snapshots
+   immediately. After normal file edits, the next session `diff`,
+   `request_land`, `land`, `approve`, or `abandon` snapshots them; there is no
+   separate "commit".
 4. Paths scope by mount: `backend/src/api.rs` addresses the `backend` source.
    Mounts are real git repos (adopted, history preserved).
 5. `diff` (session) — review your change across every source before landing.
@@ -68,9 +78,10 @@ is how a session opens, and you edit its working copy with normal tools.
 7. `journal` — verify attribution; every act is recorded.
 
 Sessions are durable: `atelier sessions` lists them, an open session resumes
-where it stood, `abandon` closes one without landing (its work stays in
-history). A landed request steps back with `undo` — the lines return to the
-landed snapshot's parent and the request re-opens for a new decision.
+where it stood, and `atelier session abandon <session>` closes one without
+landing (its work stays in history). A landed request steps back with `undo` —
+the lines return to the landed snapshot's parent and the request re-opens for
+a new decision.
 
 ### Parked is a value, not an error
 

@@ -78,7 +78,7 @@ The landing lease, request state, and journal writes go through one coordination
 
 ### Errors (typed; the contract includes failure)
 
-`NotAWorkspace` · `AlreadyAttached` · `NestedWorkspace` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }` · `AddressNotFound { available }`
+`NotAWorkspace` · `WorkspaceExists` · `NestedWorkspace` · `GitRepositoryExists` · `AlreadyAttached` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }` · `AddressNotFound { available }`
 
 ## 2. MCP (agent face)
 
@@ -162,7 +162,12 @@ error face — its writes land in a lineage no restore selects.
 
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]`
+`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]`
+
+`session open` prints the session id and its working-copy path. Edit that path
+with normal tools over any process lifetime. Inspect it with `session diff`;
+`land` passes it through the gate, while `session abandon` closes it without
+landing.
 
 The human review flow is the v1 demo: agent `request_land`s → human runs `atelier requests`, reads the docx diff as markdown, `atelier approve` → change lands.
 
@@ -203,6 +208,9 @@ Schema versioning from day one: `schema = 1`; SQLite `user_version` for the jour
 - **Secrets (.env)** → default ignores. Rule: **ignores define the Boundary** — outside the workspace, not unversioned inside it (glossary: Boundary). Boundary changes are journaled acts.
 - **Editor atomic-save, event storms** → debounce + batch into one snapshot; default ignores carry the usual offenders.
 - **Symlinks / empty dirs / case-insensitive fs** → git semantics; document, don't fight.
+
+### Init
+- Path already contains `.git` → refuse before writing `.atelier`, name the path and the `atelier attach <path> --mount <name>` move. In-place adoption would take over the source's own git working copy; sources belong at mounts (ADR-0009).
 
 ### Attach
 - Folder already a git repo → LocalGit source: preserve history, colocate. Already jj → adopt. Inside another workspace → `NestedWorkspace`. LFS git source → loud `LfsSourceUnsupported` (ADR-0002). Re-attach → `AlreadyAttached`.
