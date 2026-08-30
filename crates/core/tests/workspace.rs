@@ -64,6 +64,26 @@ fn init_creates_control_dir_journal_and_git() {
 }
 
 #[test]
+fn an_empty_control_marker_is_not_a_workspace() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let parent = tempfile::tempdir().unwrap();
+    fs::create_dir(parent.path().join(".atelier")).unwrap();
+
+    // Opening the bare marker refuses by name.
+    let Err(error) = Workspace::open(parent.path()) else {
+        panic!("the bare marker must not open as a workspace");
+    };
+    assert!(matches!(error, Error::NotAWorkspace(_)), "got: {error:?}");
+
+    // A stray marker in an ancestor does not nest-refuse a child init.
+    let child = parent.path().join("child");
+    fs::create_dir(&child).unwrap();
+    Workspace::init(&child).unwrap();
+}
+
+#[test]
 fn attach_imports_files_and_records_snapshot() {
     let _guard = env_lock();
     let config = tempfile::tempdir().unwrap();

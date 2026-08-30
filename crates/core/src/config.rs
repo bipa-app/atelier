@@ -260,15 +260,18 @@ impl WorkspaceConfig {
     }
 }
 
+/// The file inside `.atelier` whose presence marks a workspace.
+pub(crate) const CONFIG_FILE: &str = "config.toml";
+
 /// Read `.atelier/config.toml` from a workspace's control directory.
 pub fn read_workspace_config(atelier_dir: &Path) -> Result<WorkspaceConfig, Error> {
-    let text = fs::read_to_string(atelier_dir.join("config.toml"))?;
+    let text = fs::read_to_string(atelier_dir.join(CONFIG_FILE))?;
     toml::from_str(&text).map_err(config_err)
 }
 
 /// Write `.atelier/config.toml` into a workspace's control directory.
 pub fn write_workspace_config(atelier_dir: &Path, config: &WorkspaceConfig) -> Result<(), Error> {
     let text = toml::to_string(config).map_err(config_err)?;
-    fs::write(atelier_dir.join("config.toml"), text)?;
+    fs::write(atelier_dir.join(CONFIG_FILE), text)?;
     Ok(())
 }
