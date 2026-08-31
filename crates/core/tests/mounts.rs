@@ -199,6 +199,51 @@ fn mount_refusals_speak_by_name() {
     assert!(matches!(error, Error::AlreadyAttached), "got: {error:?}");
 }
 
+#[test]
+fn a_linked_git_worktree_refuses_to_attach_and_names_its_repository() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    let checkouts = tempfile::tempdir().unwrap();
+    let worktree = checkouts.path().join("wt");
+    let added = std::process::Command::new("git")
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(&worktree)
+        .current_dir(repo.path())
+        .output()
+        .expect("add linked worktree");
+    assert!(added.status.success(), "git worktree add: {added:?}");
+
+    // A linked worktree's git state belongs to its repository: adopting
+    // it would adopt state it does not own, and importing it as a plain
+    // folder would read every file as added. The refusal names the
+    // repository to attach instead — as a mount and as the root import.
+    let error = ws.attach_mount(&worktree, "sdk").unwrap_err();
+    let Error::LinkedWorktreeUnsupported { folder, repository } = &error else {
+        panic!("got: {error:?}");
+    };
+    assert_eq!(folder, &worktree);
+    assert_eq!(
+        fs::canonicalize(repository).expect("canonicalize named repository"),
+        fs::canonicalize(repo.path()).expect("canonicalize fixture repository")
+    );
+    let error = ws.attach(&worktree).unwrap_err();
+    assert!(
+        matches!(&error, Error::LinkedWorktreeUnsupported { .. }),
+        "got: {error:?}"
+    );
+
+    // The refusal left nothing behind: the repository itself still
+    // adopts under the refused name.
+    let source = ws.attach_mount(repo.path(), "sdk").unwrap();
+    assert_eq!(source.kind.to_string(), "local-git");
+}
+
 /// A git repository fixture with two commits; the two ids, oldest first.
 fn git_repo(dir: &Path) -> Vec<String> {
     let git = |args: &[&str]| {

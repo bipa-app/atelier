@@ -270,6 +270,7 @@ impl Workspace {
         if config.sources.iter().any(|s| s.mount == ROOT_MOUNT) {
             return Err(Error::AlreadyAttached);
         }
+        refuse_shared_checkout(folder)?;
         if folder_uses_lfs(folder)? {
             return Err(Error::LfsSourceUnsupported);
         }
@@ -312,6 +313,7 @@ impl Workspace {
         let mut config = read_workspace_config(&control)?;
         let mount_dir = self.root.join(name);
         mount_refusals(name, &config, &mount_dir)?;
+        refuse_shared_checkout(folder)?;
         if folder_uses_lfs(folder)? {
             return Err(Error::LfsSourceUnsupported);
         }
@@ -2383,6 +2385,46 @@ fn mount_refusals(name: &str, config: &WorkspaceConfig, mount_dir: &Path) -> Res
         )));
     }
     Ok(())
+}
+
+/// A `.git` file (a linked worktree, a submodule checkout) marks a
+/// folder whose git state another repository owns: adopting it would
+/// adopt state it does not own, and importing it as a plain folder
+/// silently drops its git nature — every file would read as added.
+/// A worktree's pointer names its repository, so the refusal names
+/// the move.
+fn refuse_shared_checkout(folder: &Path) -> Result<(), Error> {
+    let marker = folder.join(".git");
+    if !marker.is_file() {
+        return Ok(());
+    }
+    let pointer = fs::read_to_string(&marker)?;
+    let Some(gitdir) = pointer.trim().strip_prefix("gitdir:").map(str::trim) else {
+        return Err(Error::Config(format!(
+            "{} carries a malformed .git file; only a repository owning its .git directory attaches",
+            folder.display()
+        )));
+    };
+    // A linked worktree's gitdir sits at <repository>/.git/worktrees/<name>.
+    let mut ancestors = Path::new(gitdir).ancestors();
+    let _worktree = ancestors.next();
+    let worktrees_dir = ancestors.next();
+    let dot_git = ancestors.next();
+    let repository = ancestors.next();
+    if let (Some(worktrees_dir), Some(dot_git), Some(repository)) =
+        (worktrees_dir, dot_git, repository)
+        && worktrees_dir.file_name() == Some("worktrees".as_ref())
+        && dot_git.file_name() == Some(".git".as_ref())
+    {
+        return Err(Error::LinkedWorktreeUnsupported {
+            folder: folder.to_path_buf(),
+            repository: repository.to_path_buf(),
+        });
+    }
+    Err(Error::Config(format!(
+        "{} carries a .git file pointing at {gitdir}; only a repository owning its .git directory attaches",
+        folder.display()
+    )))
 }
 
 fn folder_uses_lfs(folder: &Path) -> Result<bool, Error> {

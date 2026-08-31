@@ -78,7 +78,7 @@ The landing lease, request state, and journal writes go through one coordination
 
 ### Errors (typed; the contract includes failure)
 
-`NotAWorkspace` · `WorkspaceExists` · `NestedWorkspace` · `GitRepositoryExists` · `GitFoldConflicted { branch }` · `AlreadyAttached` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }` · `AddressNotFound { available }`
+`NotAWorkspace` · `WorkspaceExists` · `NestedWorkspace` · `GitRepositoryExists` · `GitFoldConflicted { branch }` · `LinkedWorktreeUnsupported { folder, repository }` · `AlreadyAttached` · `LfsSourceUnsupported` (attach-time, ADR-0002) · `NoActorConfigured` · `SessionNotFound` · `SessionClosed` · `RequestNotFound` · `ApprovalNotAuthorized` · `SelfApprovalForbidden` (profile) · `ApprovalsDismissed { new_snapshot }` · `LeaseHeld { holder, expires }` · `LandParkedOnConflict { request, conflicts }` · `FileTooLarge { path, limit }` · `PackageFailed { package, fell_back_to }` · `WindowTooLarge { max }` · `AddressNotFound { available }`
 
 ## 2. MCP (agent face)
 
@@ -220,7 +220,7 @@ Schema versioning from day one: `schema = 1`; SQLite `user_version` for the jour
 - Path already contains `.git` → refuse before writing `.atelier`, name the path and the `atelier attach <path> --mount <name>` move. In-place adoption would take over the source's own git working copy; sources belong at mounts (ADR-0009).
 
 ### Attach
-- Folder already a git repo → LocalGit source: preserve history, colocate. Already jj → adopt. Inside another workspace → `NestedWorkspace`. LFS git source → loud `LfsSourceUnsupported` (ADR-0002). Re-attach → `AlreadyAttached`.
+- Folder already a git repo → LocalGit source: preserve history, colocate. Already jj → adopt. Inside another workspace → `NestedWorkspace`. LFS git source → loud `LfsSourceUnsupported` (ADR-0002). Re-attach → `AlreadyAttached`. A `.git` FILE (linked worktree, submodule checkout) → loud `LinkedWorktreeUnsupported` naming the owning repository — its git state is not the folder's to adopt, and a silent folder import would read every file as added.
 - **Out-of-band git in a mount** (a commit, branch move, or push with plain git) → folds into the line on the next workspace operation under the line's landing lease, journaled as a pull: follow-up work fast-forwards, a recommit of the line's own content becomes the line, divergent content merges through the common ancestor into one `fold` state. Outstanding line edits snapshot first; open sessions keep their fork points and merge at landing, exactly as when another session lands first. Moved content that conflicts with the line refuses by name (`GitFoldConflicted { branch }`): make the working copy agree with the branch, then retry. The next landing always exports cleanly.
 
 ### Documents & packages

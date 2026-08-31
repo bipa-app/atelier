@@ -38,6 +38,18 @@ pub enum Error {
         branch: String,
     },
 
+    /// `attach` refused: the folder is a linked git worktree whose
+    /// state its repository owns; only the repository attaches whole.
+    #[error(
+        "{folder} is a linked git worktree of {repository}; attach the repository itself: atelier attach {repository} --mount <name>"
+    )]
+    LinkedWorktreeUnsupported {
+        /// The linked worktree that was offered as a source.
+        folder: PathBuf,
+        /// The repository the worktree belongs to.
+        repository: PathBuf,
+    },
+
     /// `attach` refused: the mount name is already taken.
     #[error("a source is already attached to this workspace")]
     AlreadyAttached,
