@@ -62,12 +62,108 @@ impl std::str::FromStr for ActorKind {
 #[derive(Debug, Deserialize)]
 struct ActorFile {
     actor: Option<ActorSection>,
+    git: Option<GitSection>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ActorSection {
     name: String,
     kind: ActorKind,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitSection {
+    name: String,
+    email: String,
+    signing: Option<SigningSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SigningSection {
+    backend: SigningBackend,
+    key: String,
+}
+
+/// The git identity a workspace publishes under (ADR-0015): committer of
+/// every commit the engine writes, author of the owning human's own
+/// commits, and — when signing is configured — the identity whose key
+/// vouches for all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitIdentity {
+    pub name: String,
+    pub email: String,
+    pub signing: Option<Signing>,
+}
+
+/// How the publishing identity signs what it publishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Signing {
+    pub backend: SigningBackend,
+    /// The gpg key id, or the path to an ssh key file.
+    pub key: String,
+}
+
+/// The signing program family, as jj names its backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SigningBackend {
+    Gpg,
+    Ssh,
+}
+
+/// Resolve the publishing identity from the same config home as the
+/// actor. A missing file or a file without a `[git]` section is simply
+/// no identity — the engine falls back to its synthetic per-actor
+/// address and signs nothing.
+pub(crate) fn resolve_git_identity() -> Result<Option<GitIdentity>, Error> {
+    let Some(path) = actor_config_path() else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)?;
+    let parsed: ActorFile = toml::from_str(&text).map_err(config_err)?;
+    let Some(section) = parsed.git else {
+        return Ok(None);
+    };
+    if section.name.is_empty() {
+        return Err(Error::Config("git.name must not be empty".to_owned()));
+    }
+    if section.email.is_empty() {
+        return Err(Error::Config("git.email must not be empty".to_owned()));
+    }
+    let signing = section
+        .signing
+        .map(|signing| {
+            if signing.key.is_empty() {
+                return Err(Error::Config(
+                    "git.signing.key must not be empty".to_owned(),
+                ));
+            }
+            Ok(Signing {
+                backend: signing.backend,
+                key: expand_home(&signing.key)?,
+            })
+        })
+        .transpose()?;
+    Ok(Some(GitIdentity {
+        name: section.name,
+        email: section.email,
+        signing,
+    }))
+}
+
+/// Expand a leading `~/` against `$HOME`: ssh key paths are configured
+/// the way shells write them, but the signing program receives the path
+/// verbatim.
+fn expand_home(key: &str) -> Result<String, Error> {
+    let Some(rest) = key.strip_prefix("~/") else {
+        return Ok(key.to_owned());
+    };
+    let home = env::var("HOME")
+        .map_err(|_| Error::Config(format!("cannot expand {key:?}: HOME is unset")))?;
+    Ok(format!("{home}/{rest}"))
 }
 
 /// Resolve the actor from the first config home that applies.

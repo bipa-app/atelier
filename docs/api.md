@@ -184,7 +184,9 @@ The human review flow is the v1 demo: agent `request_land`s → human runs `atel
 
 ```toml
 # global
-[actor]     name = "luiz"   kind = "human"
+[actor]       name = "luiz"   kind = "human"
+[git]         name = "Luiz Parreira"   email = "luiz@example.com"   # publishing identity (ADR-0015)
+[git.signing] backend = "ssh"   key = "~/.ssh/id_ed25519"           # or backend = "gpg", key = "<key id>"
 
 # workspace
 schema = 1
@@ -196,6 +198,9 @@ schema = 1
 [[source]]  kind = "local-folder"  path = "."  sync = "two-way"  mount = "/"
 [packages]  pins = { "format-docx" = "0.1" }
 ```
+
+With `[git]` configured the identity is the committer of every commit atelier writes; the owning human authors as the identity, agents author as themselves (`codex@atelier.local`). With `[git.signing]`, everything the engine writes is signed with the identity's key — hosts verify the committer, authorship stays attributed. Without `[git]`: synthetic per-actor addresses, unsigned (ADR-0015).
+
 
 Schema versioning from day one: `schema = 1`; SQLite `user_version` for the journal; `manifest` reports surface version.
 

@@ -28,7 +28,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::Actor;
+use crate::config::{Actor, ActorKind, GitIdentity, SigningBackend, resolve_git_identity};
 use crate::error::{Error, config_err, engine_err};
 use crate::workspace::SKIP_NAMES;
 
@@ -138,13 +138,20 @@ pub(crate) struct Engine {
     /// Mount names outside this engine's world: never snapshotted as its
     /// content, however they appear (ADR-0009).
     boundary: Vec<String>,
+    /// The publishing identity, when one is configured (ADR-0015);
+    /// per-actor author stamps consult it.
+    git: Option<GitIdentity>,
+    /// The author this engine stamps on the commits it creates, from its
+    /// construction actor: name, then address.
+    author: (String, String),
 }
 
 impl Engine {
     /// Create a colocated-git workspace store rooted at `root`; paths under
     /// the `boundary` names are outside this engine's world.
     pub fn init(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
-        let settings = build_settings(actor)?;
+        let git = resolve_git_identity()?;
+        let settings = build_settings(actor, git.as_ref())?;
         let (jj, repo) = block_on(JjWorkspace::init_colocated_git(
             &settings,
             root,
@@ -156,12 +163,21 @@ impl Engine {
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
+            author: author_identity(actor, git.as_ref()),
+            git,
         })
+    }
+
+    /// The signature this engine stamps as author on the commits it
+    /// creates; rewrites and rebases keep the original authors.
+    fn author(&self) -> Signature {
+        stamp(self.author.clone())
     }
 
     /// Load the workspace store already present at `root`.
     pub fn open(root: &Path, actor: &Actor, boundary: &[String]) -> Result<Self, Error> {
-        let settings = build_settings(actor)?;
+        let git = resolve_git_identity()?;
+        let settings = build_settings(actor, git.as_ref())?;
         let jj = JjWorkspace::load(
             &settings,
             root,
@@ -175,6 +191,8 @@ impl Engine {
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
+            author: author_identity(actor, git.as_ref()),
+            git,
         })
     }
 
@@ -191,7 +209,8 @@ impl Engine {
         actor: &Actor,
         boundary: &[String],
     ) -> Result<Self, Error> {
-        let settings = build_settings(actor)?;
+        let git = resolve_git_identity()?;
+        let settings = build_settings(actor, git.as_ref())?;
         // Canonical, as the workspace loader would keep it: session
         // registrations compute pointers relative to this path.
         let repo_path = fs::canonicalize(root.join(".jj").join("repo"))?;
@@ -216,6 +235,8 @@ impl Engine {
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
+            author: author_identity(actor, git.as_ref()),
+            git,
         })
     }
 
@@ -375,6 +396,7 @@ impl Engine {
             }
             tx.repo_mut()
                 .new_commit(vec![target_id], merged)
+                .set_author(self.author())
                 .set_description("fold")
                 .write()
                 .await
@@ -465,7 +487,8 @@ impl Engine {
         actor: &Actor,
         boundary: &[String],
     ) -> Result<Self, Error> {
-        let settings = build_settings(actor)?;
+        let git = resolve_git_identity()?;
+        let settings = build_settings(actor, git.as_ref())?;
         let (mut jj, repo) = JjWorkspace::init_external_git(&settings, root, &root.join(".git"))
             .await
             .map_err(engine_err)?;
@@ -488,7 +511,7 @@ impl Engine {
                 let wc_commit = tx
                     .repo_mut()
                     .new_commit(vec![head_id], head.tree())
-                    .set_author(signature(actor))
+                    .set_author(stamp(author_identity(actor, git.as_ref())))
                     // The continuation lands beneath the first landed
                     // change; `git log` must not read it as a blank.
                     .set_description("adopt")
@@ -523,6 +546,8 @@ impl Engine {
             repo,
             _settings: settings,
             boundary: boundary.to_vec(),
+            author: author_identity(actor, git.as_ref()),
+            git,
         })
     }
 
@@ -565,6 +590,7 @@ impl Engine {
             None => return Err(Error::Engine("no working-copy commit".to_owned())),
         };
         let options = snapshot_options(base_ignores(&self.boundary)?);
+        let author = self.author();
 
         let mut locked = self
             .jj
@@ -595,7 +621,8 @@ impl Engine {
         let mut tx = self.repo.start_transaction();
         tx.set_is_snapshot(true);
         let new_commit =
-            Self::write_snapshot_commit(tx.repo_mut(), style, wc_id, &wc_commit, new_tree).await?;
+            Self::write_snapshot_commit(tx.repo_mut(), style, wc_id, &wc_commit, new_tree, author)
+                .await?;
         let new_id = new_commit.id().clone();
         tx.repo_mut()
             .set_wc_commit(name, new_id.clone())
@@ -641,10 +668,12 @@ impl Engine {
         wc_id: CommitId,
         wc_commit: &jj_lib::commit::Commit,
         new_tree: MergedTree,
+        author: Signature,
     ) -> Result<jj_lib::commit::Commit, Error> {
         match style {
             SnapshotStyle::Stack | SnapshotStyle::StackKeepHead => repo
                 .new_commit(vec![wc_id], new_tree)
+                .set_author(author)
                 .set_description("snapshot")
                 .write()
                 .await
@@ -747,7 +776,7 @@ impl Engine {
         let wc_commit = tx
             .repo_mut()
             .new_commit(vec![head_id], head.tree())
-            .set_author(signature(actor))
+            .set_author(stamp(author_identity(actor, self.git.as_ref())))
             .set_description(description)
             .write()
             .await
@@ -1169,24 +1198,55 @@ fn init_absent_working_copy(
     Ok(working_copy)
 }
 
-fn build_settings(actor: &Actor) -> Result<UserSettings, Error> {
+/// The jj settings an engine runs under. The `user` — author and
+/// committer of every commit the engine writes — is the publishing
+/// identity when one is configured, else a synthetic per-actor address.
+/// Configured signing signs with behavior `force`: everything this
+/// engine writes publishes under the identity's key, whoever authored
+/// it — agents author, the owner vouches (ADR-0015).
+fn build_settings(actor: &Actor, git: Option<&GitIdentity>) -> Result<UserSettings, Error> {
     #[derive(serde::Serialize)]
     struct UserConfig<'a> {
         user: UserSection<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signing: Option<SigningSection<'a>>,
     }
 
     #[derive(serde::Serialize)]
     struct UserSection<'a> {
         name: &'a str,
-        email: String,
+        email: &'a str,
     }
+
+    #[derive(serde::Serialize)]
+    struct SigningSection<'a> {
+        backend: &'static str,
+        behavior: &'static str,
+        key: &'a str,
+    }
+
+    let synthesized;
+    let (name, email) = if let Some(git) = git {
+        (git.name.as_str(), git.email.as_str())
+    } else {
+        synthesized = format!("{}@atelier.local", actor.name);
+        (actor.name.as_str(), synthesized.as_str())
+    };
+    let signing = git
+        .and_then(|git| git.signing.as_ref())
+        .map(|signing| SigningSection {
+            backend: match signing.backend {
+                SigningBackend::Gpg => "gpg",
+                SigningBackend::Ssh => "ssh",
+            },
+            behavior: "force",
+            key: &signing.key,
+        });
 
     let mut config = StackedConfig::with_defaults();
     let text = toml::to_string(&UserConfig {
-        user: UserSection {
-            name: &actor.name,
-            email: format!("{}@atelier.local", actor.name),
-        },
+        user: UserSection { name, email },
+        signing,
     })
     .map_err(config_err)?;
     let layer = ConfigLayer::parse(ConfigSource::User, &text).map_err(config_err)?;
@@ -1194,13 +1254,25 @@ fn build_settings(actor: &Actor) -> Result<UserSettings, Error> {
     UserSettings::from_config(config).map_err(config_err)
 }
 
-/// The commit signature attributing a session's change to its actor; the
-/// synthetic address keeps the git backend satisfied, as in
-/// [`build_settings`].
-fn signature(actor: &Actor) -> Signature {
+/// The author an actor's commits carry: the publishing identity for the
+/// owning human; the synthetic actor address for agents and automations,
+/// so their work stays attributed while the committer — and, when
+/// signing is configured, the signature — remains the identity's
+/// (ADR-0015).
+fn author_identity(actor: &Actor, git: Option<&GitIdentity>) -> (String, String) {
+    match (git, actor.kind) {
+        (Some(git), ActorKind::Human) => (git.name.clone(), git.email.clone()),
+        (Some(_) | None, ActorKind::Agent | ActorKind::Automation) | (None, ActorKind::Human) => {
+            (actor.name.clone(), format!("{}@atelier.local", actor.name))
+        }
+    }
+}
+
+/// A signature stamped now from an author identity.
+fn stamp((name, email): (String, String)) -> Signature {
     Signature {
-        name: actor.name.clone(),
-        email: format!("{}@atelier.local", actor.name),
+        name,
+        email,
         timestamp: Timestamp::now(),
     }
 }

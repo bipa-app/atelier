@@ -31,6 +31,11 @@ journal                       who did what, attributed, always
 Editing never takes a lease; landing always passes the gate. A parked landing is a
 value, not an error: resolve in the session and approve again — what landed stands.
 
+Commits publish verified when the config home the serving process (or the
+acting agent's scoped `ATELIER_CONFIG_HOME`) carries the owner's `[git]` and
+`[git.signing]` sections: the owner is committer and signer of everything
+atelier writes, agents keep authoring as themselves (ADR-0015).
+
 ## Long-lived CLI sessions
 
 ```sh

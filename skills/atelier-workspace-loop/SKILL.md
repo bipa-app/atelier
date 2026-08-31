@@ -30,6 +30,10 @@ curl -fsSL https://atelier-ws.dev/install.sh | sh   # or: cargo install atelier-
   `actor_kind: "agent"` per call; on the CLI point `ATELIER_CONFIG_HOME` at
   your own config for the acting commands. The journal records whoever the
   act names — attribution is the product.
+- A `[git]` section in the same config names the publishing identity: the
+  committer (and, with `[git.signing]`, the signer) of every commit atelier
+  writes. When your scoped config carries the owner's `[git]` section, your
+  landed work publishes verified; you still author as yourself.
 
 ## The fastest deep integration: run yourself inside a session
 

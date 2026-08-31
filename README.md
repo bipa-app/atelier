@@ -68,6 +68,18 @@ atelier diff
 
 The journal names who did what and when; the diff reads at the highest fidelity the format allows — a changed .docx prints a markdown line diff, never "binary files differ".
 
+To publish verified commits, add your git identity and signing key — you stay the committer and signer of everything atelier writes, while agents keep authoring as themselves:
+
+```toml
+[git]
+name = "Your Name"
+email = "you@example.com"      # the email your git host verifies
+
+[git.signing]
+backend = "ssh"                # or "gpg" with a key id
+key = "~/.ssh/id_ed25519"
+```
+
 From there:
 
 - `atelier watch` — external edits (Finder, any editor) become attributed snapshots within seconds.
