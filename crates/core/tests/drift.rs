@@ -420,3 +420,57 @@ fn a_conflicting_out_of_band_move_refuses_by_name_and_resolves() {
         "conflicting push"
     );
 }
+
+#[test]
+fn an_out_of_band_detached_head_commit_never_wedges_the_next_land() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    ws.attach_mount(repo.path(), "sdk").unwrap();
+    let sdk = root.path().join("sdk");
+
+    let session = ws
+        .open_session(&agent(), &instruction("land the retry"))
+        .unwrap();
+    ws.session_write(session.id, "sdk/lib.rs", "pub fn lib() { retry() }\n")
+        .unwrap();
+    let outcome = ws.land(session.id).unwrap();
+    assert!(
+        matches!(outcome, GateOutcome::Landed { .. }),
+        "got: {outcome:?}"
+    );
+
+    // The reported wedge: a human "publishes by hand" inside the mount,
+    // committing on the detached HEAD the landing left behind. The
+    // branch never moves; only HEAD does. The next landing used to die
+    // with "Failed to update Git HEAD ref", repeatably.
+    let head = git(&sdk, &["rev-parse", "HEAD"]);
+    let tree = git(&sdk, &["rev-parse", "refs/heads/master^{tree}"]);
+    let by_hand = git(
+        &sdk,
+        &["commit-tree", &tree, "-p", &head, "-m", "published by hand"],
+    );
+    git(&sdk, &["update-ref", "HEAD", &by_hand, &head]);
+
+    let session = ws
+        .open_session(&agent(), &instruction("land the docs"))
+        .unwrap();
+    ws.session_write(session.id, "sdk/README.md", "readme\n\nrevised\n")
+        .unwrap();
+    let outcome = ws.land(session.id).unwrap();
+    assert!(
+        matches!(outcome, GateOutcome::Landed { .. }),
+        "got: {outcome:?}"
+    );
+
+    // The branch is the line: both landings stand and the off-line hand
+    // commit stays off it.
+    assert_eq!(
+        git(&sdk, &["log", "--format=%s", "refs/heads/master"]),
+        "land the docs\nland the retry\nadopt\nsecond pre-attach commit\nthe pre-attach commit"
+    );
+}
