@@ -49,8 +49,10 @@ pub enum Act {
     /// A landed line mirrored back to its folder source; the reference
     /// names the source and the synced snapshot (ADR-0010).
     Sync,
-    /// Bucket-side changes folded into a mounted line as one snapshot
-    /// (ADR-0012, the pull); the reference names the source and snapshot.
+    /// External changes folded into a line as one move: bucket-side
+    /// changes on a remote source (ADR-0012, the pull), or an
+    /// out-of-band git operation on a colocated repo. The reference
+    /// names the source and snapshot.
     Pull,
     /// A landed request stepped back off a line: the head returned to the
     /// landed snapshot's parent, which the reference names with the

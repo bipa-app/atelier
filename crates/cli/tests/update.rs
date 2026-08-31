@@ -9,11 +9,16 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-/// Copy the built binary into `dir` so the updater lookup resolves
-/// against a directory the test controls.
+/// Hard-link the built binary into `dir` so the updater lookup resolves
+/// against a directory the test controls. A link, not a copy: a copy
+/// holds a write descriptor another test's concurrent fork inherits,
+/// and executing a write-open file fails with ETXTBSY on Linux. The
+/// copy remains the cross-filesystem fallback.
 fn install_binary(dir: &Path) -> PathBuf {
     let binary = dir.join("atelier");
-    fs::copy(env!("CARGO_BIN_EXE_atelier"), &binary).expect("copy atelier binary");
+    if fs::hard_link(env!("CARGO_BIN_EXE_atelier"), &binary).is_err() {
+        fs::copy(env!("CARGO_BIN_EXE_atelier"), &binary).expect("copy atelier binary");
+    }
     binary
 }
 

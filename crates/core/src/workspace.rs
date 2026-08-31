@@ -21,7 +21,7 @@ use crate::config::{
 };
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
 use crate::engine::{
-    DiffSides, Engine, FileBlob, LADDER_FILE_SIZE_MAX, LandOutcome, Side, StepBack,
+    DiffSides, Engine, FileBlob, GitFold, LADDER_FILE_SIZE_MAX, LandOutcome, Side, StepBack,
 };
 use crate::error::{Error, config_err, engine_err};
 use crate::journal::{Act, Journal, JournalEntry};
@@ -1022,13 +1022,110 @@ impl Workspace {
     }
 
     /// Reload every engine at its current operation head, folding in what
-    /// other processes committed since this handle loaded.
+    /// other processes committed since this handle loaded — and any
+    /// out-of-band git operation on a colocated repo (an external commit,
+    /// branch move, or push), which folds into its line like a pull.
     fn refresh_engines(&mut self) -> Result<(), Error> {
+        self.reload_engines()?;
+        self.fold_out_of_band_git()
+    }
+
+    /// Reload alone, without the fold: the apply calls this while it
+    /// holds a line's landing lease, where a fold's own claim on the
+    /// same point must never nest.
+    fn reload_engines(&mut self) -> Result<(), Error> {
         self.engine.refresh()?;
         for mount in &mut self.mounts {
             mount.engine.refresh()?;
         }
         Ok(())
+    }
+
+    /// Fold out-of-band git moves into their lines, each under its
+    /// line's landing lease — a fold moves a line the way a landing
+    /// does. Open sessions stay at their fork points and merge at
+    /// landing, exactly as they do when another session lands first.
+    fn fold_out_of_band_git(&mut self) -> Result<(), Error> {
+        let root_moved = self.engine.git_moved()?;
+        let mut moved = Vec::new();
+        for index in 0..self.mounts.len() {
+            if self.mounts[index].engine.git_moved()? {
+                moved.push(index);
+            }
+        }
+        if root_moved {
+            self.fold_source(None)?;
+        }
+        for index in moved {
+            self.fold_source(Some(index))?;
+        }
+        Ok(())
+    }
+
+    /// Fold one source's line under its landing lease. A lease held by
+    /// another actor skips the fold — that mover owns the line right
+    /// now, and the next operation probes again.
+    fn fold_source(&mut self, index: Option<usize>) -> Result<(), Error> {
+        let point = match index {
+            Some(index) => format!("{LANDING_LEASE_POINT}/{}", self.mounts[index].name),
+            None => LANDING_LEASE_POINT.to_owned(),
+        };
+        let holder = format!("{}:{}", self.actor.name, std::process::id());
+        let now = now_ms()?;
+        if let LeaseClaim::HeldByOther { .. } =
+            self.coordination
+                .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
+        {
+            return Ok(());
+        }
+        let folded = self.fold_source_holding_lease(index);
+        let released = self.coordination.release_lease(&point, &holder);
+        let folded = folded?;
+        released?;
+        if let GitFold::Folded { head } = folded {
+            let reference = match index {
+                Some(index) => format!("{} {head}", self.mounts[index].name),
+                None => head,
+            };
+            let entry = self.entry(Act::Pull, Some(reference))?;
+            self.journal.append(&entry)?;
+        }
+        Ok(())
+    }
+
+    /// The leased fold: reload this source at its head (the probe ran
+    /// before the claim), record outstanding disk edits without
+    /// touching git HEAD — the moved HEAD may be the fold's target —
+    /// then fold. Disk truth first; freshly recorded work is flagged so
+    /// the fold merges it rather than mistaking it for rewritten
+    /// history.
+    fn fold_source_holding_lease(&mut self, index: Option<usize>) -> Result<GitFold, Error> {
+        let snapshot = if let Some(index) = index {
+            self.mounts[index].engine.refresh()?;
+            self.mounts[index].engine.snapshot_keep_head()?
+        } else {
+            self.engine.refresh()?;
+            self.engine.snapshot_keep_head()?
+        };
+        if let Some(id) = &snapshot {
+            let reference = match index {
+                Some(index) => format!("{} {id}", self.mounts[index].name),
+                None => id.clone(),
+            };
+            let entry = self.entry(Act::Snapshot, Some(reference))?;
+            self.journal.append(&entry)?;
+        }
+        let fresh_snapshot = snapshot.is_some();
+        match index {
+            Some(index) => {
+                let branch = self.mounts[index]
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
+                self.mounts[index].engine.fold_git(&branch, fresh_snapshot)
+            }
+            None => self.engine.fold_git(LANDED_BOOKMARK, fresh_snapshot),
+        }
     }
 
     /// Watch the workspace root: external edits become attributed
@@ -1217,8 +1314,9 @@ impl Workspace {
         }
         // Another process may have advanced this line since the gate
         // check; the lease is held, so the head stays put through the
-        // apply.
-        self.refresh_engines()?;
+        // apply. Reload alone — a fold claims this same lease and must
+        // never nest inside it.
+        self.reload_engines()?;
         self.auto_snapshot()?;
         let outcome = match source {
             None => self.engine.land(tip, LANDED_BOOKMARK)?,
@@ -1651,7 +1749,7 @@ impl Workspace {
         if !recorded.is_empty() {
             // The landing engines read this handle's view; fold the
             // sessions' operations in.
-            self.refresh_engines()?;
+            self.reload_engines()?;
         }
         Ok(SessionTips {
             root: root_tip,
