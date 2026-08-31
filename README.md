@@ -82,7 +82,7 @@ Everything the CLI does, the `atelier-sdk` crate does directly:
 
 ```toml
 [dependencies]
-atelier-sdk = "0.2"
+atelier-sdk = "0.3"
 ```
 
 With the actor configured as above, a workspace, a session, one write, and
