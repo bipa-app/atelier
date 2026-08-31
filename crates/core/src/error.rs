@@ -106,6 +106,17 @@ pub enum Error {
         new_snapshot: String,
     },
 
+    /// A leased line move lost its tenancy before publishing: a newer
+    /// claim superseded the lease while this holder worked. Nothing
+    /// moved.
+    #[error(
+        "the landing lease for {point:?} was superseded before anything published; rerun the operation"
+    )]
+    LeaseSuperseded {
+        /// The landing point whose lease was superseded.
+        point: String,
+    },
+
     /// Another actor holds the landing lease.
     #[error("the landing lease is held by {holder} until {expires_at_ms}")]
     LeaseHeld {

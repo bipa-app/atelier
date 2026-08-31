@@ -76,7 +76,8 @@ fn ensure_schema(conn: &Connection) -> Result<(), Error> {
         CREATE TABLE IF NOT EXISTS lease (
             point TEXT PRIMARY KEY,
             holder TEXT NOT NULL,
-            expires_at_ms INTEGER NOT NULL
+            expires_at_ms INTEGER NOT NULL,
+            epoch INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sync_state (
             mount TEXT PRIMARY KEY,
@@ -85,7 +86,27 @@ fn ensure_schema(conn: &Connection) -> Result<(), Error> {
         );",
     )
     .map_err(engine_err)?;
-    conn.pragma_update(None, "user_version", 5)
+    migrate_lease_epoch(conn)?;
+    conn.pragma_update(None, "user_version", 6)
         .map_err(engine_err)?;
+    Ok(())
+}
+
+/// A store from before the fenced lease carries an epoch-less `lease`
+/// table, and `CREATE IF NOT EXISTS` cannot add the column. `DEFAULT 0`
+/// keeps every real tenancy (epochs count from 1) newer than any
+/// pre-fence row.
+fn migrate_lease_epoch(conn: &Connection) -> Result<(), Error> {
+    let fenced: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('lease') WHERE name = 'epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(engine_err)?;
+    if fenced == 0 {
+        conn.execute_batch("ALTER TABLE lease ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0")
+            .map_err(engine_err)?;
+    }
     Ok(())
 }

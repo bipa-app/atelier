@@ -113,6 +113,12 @@ pub(crate) enum GitFold {
     Folded { head: String },
 }
 
+/// The fence a leased line move runs at its last pure moment — after
+/// the long phases, before the first externally visible write (a git
+/// ref, an operation commit). It renews a standing tenancy and refuses
+/// a superseded one; on refusal nothing has published.
+pub(crate) type Fence<'a> = &'a dyn Fn() -> Result<(), Error>;
+
 /// How a snapshot enters history: the shared line stacks a new commit
 /// per state; the fold's pre-snapshot stacks without moving git HEAD —
 /// an out-of-band move may have put HEAD exactly where the fold must
@@ -295,14 +301,20 @@ impl Engine {
     /// `fresh_snapshot` says that snapshot recorded new work, which the
     /// history scan must never mistake for rewritten history — fresh
     /// work merges, it is never superseded.
-    pub fn fold_git(&mut self, branch: &str, fresh_snapshot: bool) -> Result<GitFold, Error> {
-        block_on(self.fold_git_async(branch, fresh_snapshot))
+    pub fn fold_git(
+        &mut self,
+        branch: &str,
+        fresh_snapshot: bool,
+        fence: Fence<'_>,
+    ) -> Result<GitFold, Error> {
+        block_on(self.fold_git_async(branch, fresh_snapshot, fence))
     }
 
     async fn fold_git_async(
         &mut self,
         branch: &str,
         fresh_snapshot: bool,
+        fence: Fence<'_>,
     ) -> Result<GitFold, Error> {
         let name = self.jj.workspace_name().to_owned();
         let mut tx = self.repo.start_transaction();
@@ -318,10 +330,10 @@ impl Engine {
         // Refs moved but the line's target did not leave it: absorb the
         // imports so the next export speaks from git's current state.
         let Some(target_id) = target_id else {
-            return self.absorb_refs(tx).await;
+            return self.absorb_refs(tx, fence).await;
         };
         if target_id == wc_id {
-            return self.absorb_refs(tx).await;
+            return self.absorb_refs(tx, fence).await;
         }
         let wc_commit = self.repo.store().get_commit(&wc_id).map_err(engine_err)?;
         let target = self
@@ -330,7 +342,7 @@ impl Engine {
             .get_commit(&target_id)
             .map_err(engine_err)?;
         if wc_commit.parent_ids() == [target_id.clone()] {
-            return self.absorb_refs(tx).await;
+            return self.absorb_refs(tx, fence).await;
         }
         let line = if is_ancestor(&tx, &wc_id, &target_id).await? {
             // The move built on the line (a plain push of follow-up
@@ -363,6 +375,7 @@ impl Engine {
                 .await
                 .map_err(engine_err)?
         };
+        fence()?;
         tx.repo_mut()
             .set_wc_commit(name, line.id().clone())
             .map_err(engine_err)?;
@@ -382,7 +395,8 @@ impl Engine {
 
     /// Keep imported refs without moving the line, as the fold's
     /// no-movement outcome.
-    async fn absorb_refs(&mut self, tx: Transaction) -> Result<GitFold, Error> {
+    async fn absorb_refs(&mut self, tx: Transaction, fence: Fence<'_>) -> Result<GitFold, Error> {
+        fence()?;
         self.repo = tx.commit("fold git refs").await.map_err(engine_err)?;
         Ok(GitFold::Current)
     }
@@ -510,24 +524,28 @@ impl Engine {
     /// Snapshot outstanding edits. Records a new commit only when the tree
     /// changed; returns the new snapshot id in that case.
     pub fn snapshot(&mut self) -> Result<Option<String>, Error> {
-        block_on(self.snapshot_with(&SnapshotStyle::Stack))
+        block_on(self.snapshot_with(&SnapshotStyle::Stack, None))
     }
 
     /// Snapshot outstanding edits like [`Engine::snapshot`], but leave
     /// the colocated git HEAD alone: the fold that follows reads the
     /// out-of-band HEAD as a possible target, and resetting it here
     /// would erase the move (or refuse against it) before the import.
-    pub fn snapshot_keep_head(&mut self) -> Result<Option<String>, Error> {
-        block_on(self.snapshot_with(&SnapshotStyle::StackKeepHead))
+    pub fn snapshot_keep_head(&mut self, fence: Fence<'_>) -> Result<Option<String>, Error> {
+        block_on(self.snapshot_with(&SnapshotStyle::StackKeepHead, Some(fence)))
     }
 
     /// Snapshot outstanding edits by amending this workspace's commit: the
     /// session's change id survives while its tree advances.
     pub fn snapshot_amend(&mut self) -> Result<Option<String>, Error> {
-        block_on(self.snapshot_with(&SnapshotStyle::Amend))
+        block_on(self.snapshot_with(&SnapshotStyle::Amend, None))
     }
 
-    async fn snapshot_with(&mut self, style: &SnapshotStyle) -> Result<Option<String>, Error> {
+    async fn snapshot_with(
+        &mut self,
+        style: &SnapshotStyle,
+        fence: Option<Fence<'_>>,
+    ) -> Result<Option<String>, Error> {
         let name = self.jj.workspace_name().to_owned();
         let wc_id = match self.repo.view().get_wc_commit_id(&name) {
             Some(id) => id.clone(),
@@ -583,6 +601,12 @@ impl Engine {
                     .map_err(engine_err)?;
             }
             SnapshotStyle::StackKeepHead | SnapshotStyle::Amend => {}
+        }
+        // A leased snapshot (the fold's pre-snapshot) fences before its
+        // operation publishes; unleased snapshots record disk truth and
+        // carry no tenancy.
+        if let Some(fence) = fence {
+            fence()?;
         }
         let repo = tx.commit("snapshot").await.map_err(engine_err)?;
         locked
@@ -737,11 +761,21 @@ impl Engine {
     /// Land `tip` onto the shared line: rebase it onto the head, refuse a
     /// conflicted result, else advance the line and the working copy. The
     /// caller holds the landing lease.
-    pub fn land(&mut self, tip: &str, bookmark: &str) -> Result<LandOutcome, Error> {
-        block_on(self.land_async(tip, bookmark))
+    pub fn land(
+        &mut self,
+        tip: &str,
+        bookmark: &str,
+        fence: Fence<'_>,
+    ) -> Result<LandOutcome, Error> {
+        block_on(self.land_async(tip, bookmark, fence))
     }
 
-    async fn land_async(&mut self, tip: &str, bookmark: &str) -> Result<LandOutcome, Error> {
+    async fn land_async(
+        &mut self,
+        tip: &str,
+        bookmark: &str,
+        fence: Fence<'_>,
+    ) -> Result<LandOutcome, Error> {
         let name = self.jj.workspace_name().to_owned();
         let head_id = self.wc_commit_id()?;
         let tip_commit = self.commit_at(tip)?;
@@ -752,6 +786,7 @@ impl Engine {
         if rebased.has_conflict() {
             return Ok(LandOutcome::Conflicted);
         }
+        fence()?;
         tx.repo_mut()
             .set_wc_commit(name, rebased.id().clone())
             .map_err(engine_err)?;
@@ -798,11 +833,21 @@ impl Engine {
     /// the landed snapshot stays in history. The caller holds the landing
     /// lease. Idempotent by outcome: a line already stepped says so, a
     /// line that moved past the landing refuses with its head.
-    pub fn step_back(&mut self, landed: &str, bookmark: &str) -> Result<StepBack, Error> {
-        block_on(self.step_back_async(landed, bookmark))
+    pub fn step_back(
+        &mut self,
+        landed: &str,
+        bookmark: &str,
+        fence: Fence<'_>,
+    ) -> Result<StepBack, Error> {
+        block_on(self.step_back_async(landed, bookmark, fence))
     }
 
-    async fn step_back_async(&mut self, landed: &str, bookmark: &str) -> Result<StepBack, Error> {
+    async fn step_back_async(
+        &mut self,
+        landed: &str,
+        bookmark: &str,
+        fence: Fence<'_>,
+    ) -> Result<StepBack, Error> {
         let name = self.jj.workspace_name().to_owned();
         let head = self.wc_commit_id()?;
         let landed_commit = self.commit_at(landed)?;
@@ -822,6 +867,7 @@ impl Engine {
             .store()
             .get_commit(parent_id)
             .map_err(engine_err)?;
+        fence()?;
         let mut tx = self.repo.start_transaction();
         tx.repo_mut()
             .set_wc_commit(name, parent_id.clone())
