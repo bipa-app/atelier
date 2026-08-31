@@ -759,10 +759,14 @@ impl Engine {
             .rebase_descendants()
             .await
             .map_err(engine_err)?;
-        // The line advanced; keep the colocated git HEAD on it.
-        git::reset_head(tx.repo_mut(), &rebased)
-            .await
-            .map_err(engine_err)?;
+        // The line advanced; keep the colocated git HEAD on it. A move
+        // failure here is a mid-apply race — git moved between the fold
+        // and this write; retrying folds the move first.
+        git::reset_head(tx.repo_mut(), &rebased).await.map_err(|error| {
+            Error::Engine(format!(
+                "git HEAD moved during the apply ({error}); rerun the landing — the next operation folds the move first"
+            ))
+        })?;
         // The landed line must be pushable with plain git: move the
         // bookmark to the landed snapshot and export it as a git branch.
         // The working-copy commit itself never enters a branch, so the
@@ -823,10 +827,13 @@ impl Engine {
             .set_wc_commit(name, parent_id.clone())
             .map_err(engine_err)?;
         // The line stepped back; HEAD and the bookmark follow so plain git
-        // never publishes the undone head as the newest state.
-        git::reset_head(tx.repo_mut(), &parent)
-            .await
-            .map_err(engine_err)?;
+        // never publishes the undone head as the newest state. A move
+        // failure here is a mid-undo race; retrying folds the move first.
+        git::reset_head(tx.repo_mut(), &parent).await.map_err(|error| {
+            Error::Engine(format!(
+                "git HEAD moved during the undo ({error}); rerun the undo — the next operation folds the move first"
+            ))
+        })?;
         tx.repo_mut().set_local_bookmark_target(
             RefName::new(bookmark),
             RefTarget::normal(parent_id.clone()),
