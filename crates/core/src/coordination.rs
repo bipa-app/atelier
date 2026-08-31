@@ -42,9 +42,11 @@ pub(crate) struct ApprovalRow {
     pub at_ms: i64,
 }
 
-/// What one attempt to claim a lease produced.
+/// What one attempt to claim a lease produced. A successful claim opens
+/// a new tenancy: the point's epoch bumps, and the epoch is the fencing
+/// token every leased line move re-validates before publishing.
 pub(crate) enum LeaseClaim {
-    Held,
+    Held { epoch: i64 },
     HeldByOther { holder: String, expires_at_ms: i64 },
 }
 
@@ -303,12 +305,19 @@ impl Coordination {
 
     /// Un-record one source's landing under the request: an undo stepped
     /// the line back, so the fact no longer holds and a re-apply must
-    /// land it anew (ADR-0011).
-    pub fn delete_landing(&self, request_id: i64, source: Option<&str>) -> Result<(), Error> {
+    /// land it anew (ADR-0011). The snapshot names the fact being erased —
+    /// a stale writer whose landing was already replaced deletes nothing.
+    pub fn delete_landing(
+        &self,
+        request_id: i64,
+        source: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<(), Error> {
         self.conn
             .execute(
-                "DELETE FROM request_landings WHERE request_id = ?1 AND source = ?2",
-                params![request_id, source.unwrap_or(ROOT_MOUNT)],
+                "DELETE FROM request_landings
+                 WHERE request_id = ?1 AND source = ?2 AND snapshot_id = ?3",
+                params![request_id, source.unwrap_or(ROOT_MOUNT), snapshot_id],
             )
             .map_err(engine_err)?;
         Ok(())
@@ -404,6 +413,8 @@ impl Coordination {
     /// Claim `point` for `holder` until `now_ms + ttl_ms`. One statement,
     /// so exactly one claimant wins whatever processes race: the claim
     /// succeeds when the point is free, expired, or already this holder's.
+    /// Every successful claim is a new tenancy — the epoch bumps, and a
+    /// prior tenancy's fence can never validate again.
     pub fn claim_lease(
         &self,
         point: &str,
@@ -411,27 +422,32 @@ impl Coordination {
         now_ms: i64,
         ttl_ms: i64,
     ) -> Result<LeaseClaim, Error> {
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
         loop {
             let claimed = self
                 .conn
-                .execute(
-                    "INSERT INTO lease (point, holder, expires_at_ms) VALUES (?1, ?2, ?3)
+                .query_row(
+                    "INSERT INTO lease (point, holder, expires_at_ms, epoch) VALUES (?1, ?2, ?3, 1)
                      ON CONFLICT(point) DO UPDATE
-                     SET holder = excluded.holder, expires_at_ms = excluded.expires_at_ms
-                     WHERE lease.expires_at_ms <= ?4 OR lease.holder = excluded.holder",
-                    params![point, holder, now_ms + ttl_ms, now_ms],
+                     SET holder = excluded.holder, expires_at_ms = excluded.expires_at_ms,
+                         epoch = lease.epoch + 1
+                     WHERE lease.expires_at_ms <= ?4 OR lease.holder = excluded.holder
+                     RETURNING epoch",
+                    params![point, holder, expires_at_ms, now_ms],
+                    |row| row.get::<_, i64>(0),
                 )
+                .optional()
                 .map_err(engine_err)?;
-            if claimed == 1 {
-                return Ok(LeaseClaim::Held);
+            if let Some(epoch) = claimed {
+                return Ok(LeaseClaim::Held { epoch });
             }
             // The holder may release between the failed claim and this
             // read; an absent row just means the point freed — claim again.
             let held = self
                 .conn
                 .query_row(
-                    "SELECT holder, expires_at_ms FROM lease WHERE point = ?1",
-                    params![point],
+                    "SELECT holder, expires_at_ms FROM lease WHERE point = ?1 AND expires_at_ms > ?2",
+                    params![point, now_ms],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()
@@ -445,13 +461,44 @@ impl Coordination {
         }
     }
 
-    /// Release `point` when this holder still owns it; an expired-and-taken
-    /// lease belongs to its new holder and stays.
-    pub fn release_lease(&self, point: &str, holder: &str) -> Result<(), Error> {
+    /// Extend the tenancy `(holder, epoch)` holds on `point` — the fence
+    /// a leased line move runs at its last pure moment. The guarded
+    /// write names the holder AND the epoch: a superseded tenancy (a
+    /// newer claim bumped the epoch) changes nothing and refuses, while
+    /// expiry alone — nobody else claimed — renews and stays a
+    /// non-event.
+    pub fn renew_lease(
+        &self,
+        point: &str,
+        holder: &str,
+        epoch: i64,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<bool, Error> {
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
+        let renewed = self
+            .conn
+            .execute(
+                "UPDATE lease SET expires_at_ms = ?1
+                 WHERE point = ?2 AND holder = ?3 AND epoch = ?4",
+                params![expires_at_ms, point, holder, epoch],
+            )
+            .map_err(engine_err)?;
+        Ok(renewed == 1)
+    }
+
+    /// Release the tenancy `(holder, epoch)` holds on `point`. The row
+    /// stays and the epoch burns — a released tenancy becomes
+    /// unrenewable exactly like a superseded one, and a later claim
+    /// bumps past the high-water mark, so no earlier fence can ever
+    /// validate again. An expired-and-taken lease belongs to its new
+    /// tenancy and stays.
+    pub fn release_lease(&self, point: &str, holder: &str, epoch: i64) -> Result<(), Error> {
         self.conn
             .execute(
-                "DELETE FROM lease WHERE point = ?1 AND holder = ?2",
-                params![point, holder],
+                "UPDATE lease SET expires_at_ms = 0, epoch = epoch + 1
+                 WHERE point = ?1 AND holder = ?2 AND epoch = ?3",
+                params![point, holder, epoch],
             )
             .map_err(engine_err)?;
         Ok(())
@@ -490,6 +537,14 @@ fn collect<T>(rows: impl Iterator<Item = Result<T, rusqlite::Error>>) -> Result<
     Ok(out)
 }
 
+/// When a tenancy claimed or renewed now expires. Checked: an expiry
+/// past `i64` would wrap into the past and hand the point away.
+fn lease_expiry(now_ms: i64, ttl_ms: i64) -> Result<i64, Error> {
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| Error::Engine(format!("lease expiry overflows: {now_ms} + {ttl_ms}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,13 +572,13 @@ mod tests {
             coordination
                 .claim_lease("landing/aa", "one", 0, 1000)
                 .unwrap(),
-            LeaseClaim::Held
+            LeaseClaim::Held { .. }
         ));
         assert!(matches!(
             coordination
                 .claim_lease("landing/bb", "two", 0, 1000)
                 .unwrap(),
-            LeaseClaim::Held
+            LeaseClaim::Held { .. }
         ));
         // One source's point still admits exactly one holder.
         assert!(matches!(
@@ -532,6 +587,149 @@ mod tests {
                 .unwrap(),
             LeaseClaim::HeldByOther { .. }
         ));
+    }
+
+    #[test]
+    fn a_claim_opens_a_new_tenancy_and_a_superseded_fence_refuses() {
+        let (_dir, coordination) = coordination();
+
+        // The first tenancy.
+        let LeaseClaim::Held { epoch: first } =
+            coordination.claim_lease("landing", "one", 0, 100).unwrap()
+        else {
+            panic!("the free point must claim");
+        };
+        assert_eq!(first, 1);
+
+        // Expiry alone is a non-event: nobody claimed, the fence renews.
+        assert!(
+            coordination
+                .renew_lease("landing", "one", first, 200, 100)
+                .unwrap()
+        );
+
+        // A newer claim after expiry supersedes: the epoch bumps and the
+        // first tenancy's fence refuses from then on, forever.
+        let LeaseClaim::Held { epoch: second } = coordination
+            .claim_lease("landing", "two", 400, 100)
+            .unwrap()
+        else {
+            panic!("the expired point must claim");
+        };
+        assert_eq!(second, 2);
+        assert_ne!(first, second);
+        assert!(
+            !coordination
+                .renew_lease("landing", "one", first, 450, 100)
+                .unwrap()
+        );
+        assert!(
+            coordination
+                .renew_lease("landing", "two", second, 450, 100)
+                .unwrap()
+        );
+
+        // Release keeps the epoch as high water: the next claim bumps
+        // past it, and no earlier fence validates again.
+        coordination
+            .release_lease("landing", "two", second)
+            .unwrap();
+        assert!(
+            !coordination
+                .renew_lease("landing", "two", second, 500, 100)
+                .unwrap()
+        );
+        // The release itself burned an epoch, so the next tenancy sits
+        // two past the released one.
+        let LeaseClaim::Held { epoch: third } = coordination
+            .claim_lease("landing", "one", 500, 100)
+            .unwrap()
+        else {
+            panic!("the released point must claim");
+        };
+        assert_eq!(third, 4);
+        assert!(
+            !coordination
+                .renew_lease("landing", "one", first, 550, 100)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_release_names_its_tenancy_or_loses() {
+        let (_dir, coordination) = coordination();
+        let LeaseClaim::Held { epoch } =
+            coordination.claim_lease("landing", "one", 0, 100).unwrap()
+        else {
+            panic!("the free point must claim");
+        };
+
+        // A stale release — wrong epoch — changes nothing; the tenancy
+        // stands and its fence still validates.
+        coordination
+            .release_lease("landing", "one", epoch + 1)
+            .unwrap();
+        assert!(
+            coordination
+                .renew_lease("landing", "one", epoch, 50, 100)
+                .unwrap()
+        );
+
+        // The named release ends it.
+        coordination.release_lease("landing", "one", epoch).unwrap();
+        assert!(
+            !coordination
+                .renew_lease("landing", "one", epoch, 60, 100)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pre_fence_store_gains_the_epoch_column_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        drop(Coordination::open(&path).unwrap());
+
+        // Rewind the store to its pre-fence shape.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE lease DROP COLUMN epoch; PRAGMA user_version = 5;")
+            .unwrap();
+        drop(conn);
+
+        // Opening migrates: claims fence from the first tenancy on.
+        let coordination = Coordination::open(&path).unwrap();
+        let LeaseClaim::Held { epoch } =
+            coordination.claim_lease("landing", "one", 0, 100).unwrap()
+        else {
+            panic!("the migrated point must claim");
+        };
+        assert_eq!(epoch, 1);
+        assert!(
+            coordination
+                .renew_lease("landing", "one", epoch, 50, 100)
+                .unwrap()
+        );
+    }
+
+    /// A store stamped by a newer atelier refuses to open: this binary
+    /// cannot see the newer schema's rules — the lease fence above all —
+    /// and guessing would bypass them.
+    #[test]
+    fn a_newer_store_refuses_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        drop(Coordination::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        drop(conn);
+
+        let Err(error) = Coordination::open(&path) else {
+            panic!("a newer store must refuse to open");
+        };
+        assert!(
+            error.to_string().contains("newer than this atelier"),
+            "got: {error}"
+        );
     }
 
     #[test]

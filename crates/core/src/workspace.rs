@@ -1068,21 +1068,34 @@ impl Workspace {
     /// another actor skips the fold — that mover owns the line right
     /// now, and the next operation probes again.
     fn fold_source(&mut self, index: Option<usize>) -> Result<(), Error> {
-        let point = match index {
-            Some(index) => format!("{LANDING_LEASE_POINT}/{}", self.mounts[index].name),
-            None => LANDING_LEASE_POINT.to_owned(),
-        };
-        let holder = format!("{}:{}", self.actor.name, std::process::id());
+        let source = index.map(|index| self.mounts[index].name.clone());
+        let point = lease_point(source.as_deref());
+        let holder = self.lease_holder();
         let now = now_ms()?;
-        if let LeaseClaim::HeldByOther { .. } =
-            self.coordination
-                .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
-        {
-            return Ok(());
-        }
-        let folded = self.fold_source_holding_lease(index);
-        let released = self.coordination.release_lease(&point, &holder);
-        let folded = folded?;
+        let epoch =
+            match self
+                .coordination
+                .claim_lease(&point, &holder, now, landing_lease_ttl_ms()?)?
+            {
+                LeaseClaim::HeldByOther { .. } => return Ok(()),
+                LeaseClaim::Held { epoch } => epoch,
+            };
+        let folded = self.fold_source_holding_lease(index, epoch);
+        let released = self.coordination.release_lease(&point, &holder, epoch);
+        let folded = match folded {
+            // A superseded fold skips exactly like a held point: that
+            // mover owns the line now. Reload this handle first so the
+            // operation continues — and later snapshots — on the
+            // winner's state, never the stale view the fence refused.
+            Err(Error::LeaseSuperseded { .. }) => {
+                match index {
+                    Some(index) => self.mounts[index].engine.refresh()?,
+                    None => self.engine.refresh()?,
+                }
+                GitFold::Current
+            }
+            other => other?,
+        };
         released?;
         if let GitFold::Folded { head } = folded {
             let reference = match index {
@@ -1101,13 +1114,30 @@ impl Workspace {
     /// then fold. Disk truth first; freshly recorded work is flagged so
     /// the fold merges it rather than mistaking it for rewritten
     /// history.
-    fn fold_source_holding_lease(&mut self, index: Option<usize>) -> Result<GitFold, Error> {
+    fn fold_source_holding_lease(
+        &mut self,
+        index: Option<usize>,
+        epoch: i64,
+    ) -> Result<GitFold, Error> {
+        // Test seam: the lease race tests stall the holder here so a
+        // rival can supersede its tenancy.
+        if let Some(hold) = land_hold_ms()? {
+            std::thread::sleep(Duration::from_millis(hold));
+        }
+        let source = index.map(|index| self.mounts[index].name.clone());
+        let fence = lease_fence(
+            &self.coordination,
+            lease_point(source.as_deref()),
+            self.lease_holder(),
+            epoch,
+            landing_lease_ttl_ms()?,
+        );
         let snapshot = if let Some(index) = index {
             self.mounts[index].engine.refresh()?;
-            self.mounts[index].engine.snapshot_keep_head()?
+            self.mounts[index].engine.snapshot_keep_head(&fence)?
         } else {
             self.engine.refresh()?;
-            self.engine.snapshot_keep_head()?
+            self.engine.snapshot_keep_head(&fence)?
         };
         if let Some(id) = &snapshot {
             let reference = match index {
@@ -1124,10 +1154,18 @@ impl Workspace {
                     .branch
                     .clone()
                     .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
-                self.mounts[index].engine.fold_git(&branch, fresh_snapshot)
+                self.mounts[index]
+                    .engine
+                    .fold_git(&branch, fresh_snapshot, &fence)
             }
-            None => self.engine.fold_git(LANDED_BOOKMARK, fresh_snapshot),
+            None => self
+                .engine
+                .fold_git(LANDED_BOOKMARK, fresh_snapshot, &fence),
         }
+    }
+
+    fn lease_holder(&self) -> String {
+        format!("{}:{}", self.actor.name, std::process::id())
     }
 
     /// Watch the workspace root: external edits become attributed
@@ -1273,29 +1311,27 @@ impl Workspace {
         tip: &str,
         approver: &Actor,
     ) -> Result<LandOutcome, Error> {
-        let point = match source {
-            Some(name) => format!("{LANDING_LEASE_POINT}/{name}"),
-            None => LANDING_LEASE_POINT.to_owned(),
-        };
-        let holder = format!("{}:{}", self.actor.name, std::process::id());
+        let point = lease_point(source);
+        let holder = self.lease_holder();
         let now = now_ms()?;
-        match self
-            .coordination
-            .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
-        {
-            LeaseClaim::HeldByOther {
-                holder,
-                expires_at_ms,
-            } => {
-                return Err(Error::LeaseHeld {
+        let epoch =
+            match self
+                .coordination
+                .claim_lease(&point, &holder, now, landing_lease_ttl_ms()?)?
+            {
+                LeaseClaim::HeldByOther {
                     holder,
                     expires_at_ms,
-                });
-            }
-            LeaseClaim::Held => {}
-        }
-        let outcome = self.apply_source_holding_lease(session, id, source, tip, approver);
-        let released = self.coordination.release_lease(&point, &holder);
+                } => {
+                    return Err(Error::LeaseHeld {
+                        holder,
+                        expires_at_ms,
+                    });
+                }
+                LeaseClaim::Held { epoch } => epoch,
+            };
+        let outcome = self.apply_source_holding_lease(session, id, source, tip, approver, epoch);
+        let released = self.coordination.release_lease(&point, &holder, epoch);
         let outcome = outcome?;
         released?;
         Ok(outcome)
@@ -1308,6 +1344,7 @@ impl Workspace {
         source: Option<&str>,
         tip: &str,
         approver: &Actor,
+        epoch: i64,
     ) -> Result<LandOutcome, Error> {
         // Test seam: the cross-process lease test needs the winner to hold
         // the point long enough for the loser to observe `LeaseHeld`.
@@ -1319,22 +1356,48 @@ impl Workspace {
         // apply. Reload alone — a fold claims this same lease and must
         // never nest inside it.
         self.reload_engines()?;
-        self.auto_snapshot()?;
-        let outcome = match source {
-            None => self.engine.land(tip, LANDED_BOOKMARK)?,
-            Some(name) => {
-                let index = self
-                    .mounts
+        let fence = lease_fence(
+            &self.coordination,
+            lease_point(source),
+            self.lease_holder(),
+            epoch,
+            landing_lease_ttl_ms()?,
+        );
+        // Settle the claimed line's outstanding edits under the fence —
+        // a superseded holder must not even snapshot onto the line it
+        // lost. Other sources settle on their own operations.
+        let index = match source {
+            None => None,
+            Some(name) => Some(
+                self.mounts
                     .iter()
                     .position(|mount| mount.name == name)
-                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?,
+            ),
+        };
+        let settled = match index {
+            None => self.engine.snapshot_fenced(&fence)?,
+            Some(index) => self.mounts[index].engine.snapshot_fenced(&fence)?,
+        };
+        if let Some(snapshot) = &settled {
+            let reference = match source {
+                Some(name) => format!("{name} {snapshot}"),
+                None => snapshot.clone(),
+            };
+            let entry = self.entry(Act::Snapshot, Some(reference))?;
+            self.journal.append(&entry)?;
+        }
+        let outcome = match index {
+            None => self.engine.land(tip, LANDED_BOOKMARK, &fence)?,
+            Some(index) => {
                 let bookmark = self.mounts[index]
                     .branch
                     .clone()
                     .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
-                self.mounts[index].engine.land(tip, &bookmark)?
+                self.mounts[index].engine.land(tip, &bookmark, &fence)?
             }
         };
+        drop(fence);
         let scoped = |text: &str| match source {
             Some(name) => format!("{name} {text}"),
             None => text.to_owned(),
@@ -1430,29 +1493,27 @@ impl Workspace {
         source: Option<&str>,
         landed: &str,
     ) -> Result<Option<String>, Error> {
-        let point = match source {
-            Some(name) => format!("{LANDING_LEASE_POINT}/{name}"),
-            None => LANDING_LEASE_POINT.to_owned(),
-        };
-        let holder = format!("{}:{}", self.actor.name, std::process::id());
+        let point = lease_point(source);
+        let holder = self.lease_holder();
         let now = now_ms()?;
-        match self
-            .coordination
-            .claim_lease(&point, &holder, now, LANDING_LEASE_TTL_MS)?
-        {
-            LeaseClaim::HeldByOther {
-                holder,
-                expires_at_ms,
-            } => {
-                return Err(Error::LeaseHeld {
+        let epoch =
+            match self
+                .coordination
+                .claim_lease(&point, &holder, now, landing_lease_ttl_ms()?)?
+            {
+                LeaseClaim::HeldByOther {
                     holder,
                     expires_at_ms,
-                });
-            }
-            LeaseClaim::Held => {}
-        }
-        let outcome = self.undo_source_holding_lease(session, id, source, landed);
-        let released = self.coordination.release_lease(&point, &holder);
+                } => {
+                    return Err(Error::LeaseHeld {
+                        holder,
+                        expires_at_ms,
+                    });
+                }
+                LeaseClaim::Held { epoch } => epoch,
+            };
+        let outcome = self.undo_source_holding_lease(session, id, source, landed, epoch);
+        let released = self.coordination.release_lease(&point, &holder, epoch);
         let outcome = outcome?;
         released?;
         Ok(outcome)
@@ -1466,9 +1527,37 @@ impl Workspace {
         id: RequestId,
         source: Option<&str>,
         landed: &str,
+        epoch: i64,
     ) -> Result<Option<String>, Error> {
+        // Test seam: the lease race tests stall the holder here so a
+        // rival can supersede its tenancy.
+        if let Some(hold) = land_hold_ms()? {
+            std::thread::sleep(Duration::from_millis(hold));
+        }
+        // Reload under the lease: the step classifies the line — and
+        // `AlreadyStepped` erases the landing record — so the decision
+        // must read the line as the tenancy found it, not as this handle
+        // cached it.
+        match source {
+            None => self.engine.refresh()?,
+            Some(name) => {
+                let index = self
+                    .mounts
+                    .iter()
+                    .position(|mount| mount.name == name)
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                self.mounts[index].engine.refresh()?;
+            }
+        }
+        let fence = lease_fence(
+            &self.coordination,
+            lease_point(source),
+            self.lease_holder(),
+            epoch,
+            landing_lease_ttl_ms()?,
+        );
         let step = match source {
-            None => self.engine.step_back(landed, LANDED_BOOKMARK)?,
+            None => self.engine.step_back(landed, LANDED_BOOKMARK, &fence)?,
             Some(name) => {
                 let index = self
                     .mounts
@@ -1479,14 +1568,17 @@ impl Workspace {
                     .branch
                     .clone()
                     .unwrap_or_else(|| LANDED_BOOKMARK.to_owned());
-                self.mounts[index].engine.step_back(landed, &bookmark)?
+                self.mounts[index]
+                    .engine
+                    .step_back(landed, &bookmark, &fence)?
             }
         };
+        drop(fence);
         match step {
             StepBack::Stepped { restored } => {
                 // The landing is no longer a fact: a re-apply of this
                 // request must land the line anew, not skip it.
-                self.coordination.delete_landing(id.0, source)?;
+                self.coordination.delete_landing(id.0, source, landed)?;
                 let reference = match source {
                     Some(name) => format!("{name} {id} {restored}"),
                     None => format!("{id} {restored}"),
@@ -1499,7 +1591,7 @@ impl Workspace {
             StepBack::AlreadyStepped => {
                 // The step happened on a prior attempt that died before
                 // un-recording; repair the record, journal nothing more.
-                self.coordination.delete_landing(id.0, source)?;
+                self.coordination.delete_landing(id.0, source, landed)?;
                 Ok(None)
             }
             StepBack::LineMoved { head } => {
@@ -2474,6 +2566,57 @@ fn session_file(working_copy: &Path, path: &str) -> Result<PathBuf, Error> {
         return Err(Error::PathOutsideWorkingCopy(path.to_owned()));
     }
     Ok(working_copy.join(relative))
+}
+
+/// The landing point a line move leases: the source's, or the root's.
+fn lease_point(source: Option<&str>) -> String {
+    match source {
+        Some(name) => format!("{LANDING_LEASE_POINT}/{name}"),
+        None => LANDING_LEASE_POINT.to_owned(),
+    }
+}
+
+/// The fence a leased line move runs before anything publishes: it
+/// renews the tenancy `epoch` names, and refuses by name once a newer
+/// claim superseded it (ADR-0014). Expiry alone — nobody else claimed —
+/// renews and stays a non-event.
+fn lease_fence(
+    coordination: &Coordination,
+    point: String,
+    holder: String,
+    epoch: i64,
+    ttl_ms: i64,
+) -> impl Fn() -> Result<(), Error> {
+    move || {
+        if coordination.renew_lease(&point, &holder, epoch, now_ms()?, ttl_ms)? {
+            Ok(())
+        } else {
+            Err(Error::LeaseSuperseded {
+                point: point.clone(),
+            })
+        }
+    }
+}
+
+/// The `ATELIER_LANDING_LEASE_TTL_MS` test seam: the lease race tests
+/// shrink the TTL to supersede a stalled holder without waiting out the
+/// real one. A set but unparsable or out-of-range value refuses instead
+/// of silently keeping the default — zero or negative would make every
+/// renewed lease instantly reclaimable.
+fn landing_lease_ttl_ms() -> Result<i64, Error> {
+    match env::var("ATELIER_LANDING_LEASE_TTL_MS") {
+        Ok(value) => {
+            let ttl: i64 = value.parse().map_err(config_err)?;
+            if !(1..=3_600_000).contains(&ttl) {
+                return Err(Error::Config(format!(
+                    "ATELIER_LANDING_LEASE_TTL_MS must be 1..=3600000, got {ttl}"
+                )));
+            }
+            Ok(ttl)
+        }
+        Err(VarError::NotPresent) => Ok(LANDING_LEASE_TTL_MS),
+        Err(error @ VarError::NotUnicode(_)) => Err(config_err(error)),
+    }
 }
 
 /// The `ATELIER_LAND_HOLD_MS` test seam, absent in normal runs; a set but
