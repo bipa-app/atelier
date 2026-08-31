@@ -11,4 +11,5 @@ The landing lease is a TTL claim in SQLite; the moves it guards — a landing, a
 
 - A window remains between the fence and the first write — microseconds against the seconds the guarded phases take. A process stalled exactly there can still publish; the window is named and shared by every fencing design whose resource cannot check the token itself.
 - A superseded landing or undo refuses by name (`LeaseSuperseded`) and a rerun completes what remains. A superseded fold skips exactly like a held point: the winner already folded, and the next operation probes afresh.
-- The lease row survives release, and `user_version` 6 adds its epoch column.
+- The lease row survives release, and `user_version` 6 adds its epoch column. A binary from before the fence would still claim through the pre-epoch SQL, bypassing supersession; stores stamped newer than a binary's version now refuse to open, so the next schema change fails closed. Against already-shipped pre-fence binaries the residual stands, accepted: workspaces live on one machine and installs move in lockstep through `atelier update`.
+- Reloading a store at its operation head merges divergent operation heads whoever loads it, superseded or not; the merge is deterministic and actor-independent, so the fence does not gate loads — it gates what a tenancy may publish about a line.

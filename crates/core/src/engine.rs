@@ -84,6 +84,7 @@ pub(crate) enum Side {
 }
 
 /// What one undo attempt did to the shared line (ADR-0011).
+#[derive(Debug)]
 pub(crate) enum StepBack {
     /// The line stepped back off the landed snapshot to `restored`.
     Stepped { restored: String },
@@ -364,6 +365,10 @@ impl Engine {
                 .await
                 .map_err(engine_err)?;
             if merged.has_conflict() {
+                // The refusal is consumed as this line's state — a
+                // superseded holder must not report a conflict its
+                // rival may already have resolved.
+                fence()?;
                 return Err(Error::GitFoldConflicted {
                     branch: branch.to_owned(),
                 });
@@ -527,6 +532,14 @@ impl Engine {
         block_on(self.snapshot_with(&SnapshotStyle::Stack, None))
     }
 
+    /// Snapshot outstanding edits like [`Engine::snapshot`], under a
+    /// leased line move: the fence runs before the snapshot's git HEAD
+    /// write and operation commit, so a superseded holder records
+    /// nothing.
+    pub fn snapshot_fenced(&mut self, fence: Fence<'_>) -> Result<Option<String>, Error> {
+        block_on(self.snapshot_with(&SnapshotStyle::Stack, Some(fence)))
+    }
+
     /// Snapshot outstanding edits like [`Engine::snapshot`], but leave
     /// the colocated git HEAD alone: the fold that follows reads the
     /// out-of-band HEAD as a possible target, and resetting it here
@@ -591,6 +604,13 @@ impl Engine {
             .rebase_descendants()
             .await
             .map_err(engine_err)?;
+        // A leased snapshot fences at the last pure moment — before the
+        // git HEAD write a Stack style performs, and before the commit
+        // either way; unleased snapshots record disk truth and carry no
+        // tenancy.
+        if let Some(fence) = fence {
+            fence()?;
+        }
         // Stack moves a shared line: keep the colocated git HEAD on it so
         // plain git sees what jj wrote. The fold's pre-snapshot leaves
         // HEAD to the fold; Amend is a session's and never steals HEAD.
@@ -601,12 +621,6 @@ impl Engine {
                     .map_err(engine_err)?;
             }
             SnapshotStyle::StackKeepHead | SnapshotStyle::Amend => {}
-        }
-        // A leased snapshot (the fold's pre-snapshot) fences before its
-        // operation publishes; unleased snapshots record disk truth and
-        // carry no tenancy.
-        if let Some(fence) = fence {
-            fence()?;
         }
         let repo = tx.commit("snapshot").await.map_err(engine_err)?;
         locked
@@ -784,9 +798,11 @@ impl Engine {
             .await
             .map_err(engine_err)?;
         if rebased.has_conflict() {
+            // Parking is a gate decision too: a superseded holder must
+            // not record a conflict judged from a stale head.
+            fence()?;
             return Ok(LandOutcome::Conflicted);
         }
-        fence()?;
         tx.repo_mut()
             .set_wc_commit(name, rebased.id().clone())
             .map_err(engine_err)?;
@@ -794,6 +810,9 @@ impl Engine {
             .rebase_descendants()
             .await
             .map_err(engine_err)?;
+        // Descendant rebasing can run long; the fence sits after it, at
+        // the last pure moment before the first git ref write.
+        fence()?;
         // The line advanced; keep the colocated git HEAD on it. A move
         // failure here is a mid-apply race — git moved between the fold
         // and this write; retrying folds the move first.
@@ -856,6 +875,10 @@ impl Engine {
                 "the landed snapshot {landed} has no parent to step back to"
             )));
         };
+        // The outcome itself is consumed — `AlreadyStepped` makes the
+        // caller delete the landing record — so a superseded holder must
+        // not classify the line from a stale tenancy.
+        fence()?;
         if head == *parent_id {
             return Ok(StepBack::AlreadyStepped);
         }
@@ -867,7 +890,6 @@ impl Engine {
             .store()
             .get_commit(parent_id)
             .map_err(engine_err)?;
-        fence()?;
         let mut tx = self.repo.start_transaction();
         tx.repo_mut()
             .set_wc_commit(name, parent_id.clone())
@@ -1305,4 +1327,59 @@ fn remove_unkept(root: &Path, kept: &BTreeSet<String>) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ActorKind;
+
+    fn actor() -> Actor {
+        Actor {
+            name: "fence-test".to_owned(),
+            kind: ActorKind::Agent,
+        }
+    }
+
+    /// A refused fence publishes nothing, deterministically: the refusal
+    /// lands before the step writes, before the outcome classifies as
+    /// `AlreadyStepped` — which the caller consumes to erase a landing
+    /// record — and a later permitted rerun still steps the line.
+    #[test]
+    fn a_refused_fence_neither_steps_nor_classifies() {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = Engine::init(root.path(), &actor(), &[]).unwrap();
+        std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+        let first = engine.snapshot().unwrap().expect("first snapshot");
+        std::fs::write(root.path().join("a.txt"), "two\n").unwrap();
+        let landed = engine.snapshot().unwrap().expect("landed snapshot");
+
+        let refuse: Fence<'_> = &|| {
+            Err(Error::LeaseSuperseded {
+                point: "landing".to_owned(),
+            })
+        };
+        let error = engine.step_back(&landed, "atelier", refuse).unwrap_err();
+        assert!(
+            matches!(error, Error::LeaseSuperseded { .. }),
+            "got: {error:?}"
+        );
+
+        let permit: Fence<'_> = &|| Ok(());
+        let step = engine.step_back(&landed, "atelier", permit).unwrap();
+        assert!(
+            matches!(step, StepBack::Stepped { ref restored } if *restored == first),
+            "the refusal must have left the line unstepped, got: {step:?}"
+        );
+
+        // The stepped line classifies as already stepped — but only for a
+        // holder whose tenancy still stands.
+        let error = engine.step_back(&landed, "atelier", refuse).unwrap_err();
+        assert!(
+            matches!(error, Error::LeaseSuperseded { .. }),
+            "got: {error:?}"
+        );
+        let step = engine.step_back(&landed, "atelier", permit).unwrap();
+        assert!(matches!(step, StepBack::AlreadyStepped), "got: {step:?}");
+    }
 }

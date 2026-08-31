@@ -1084,9 +1084,16 @@ impl Workspace {
         let released = self.coordination.release_lease(&point, &holder, epoch);
         let folded = match folded {
             // A superseded fold skips exactly like a held point: that
-            // mover owns the line now, and the next operation probes
-            // afresh. Nothing published.
-            Err(Error::LeaseSuperseded { .. }) => GitFold::Current,
+            // mover owns the line now. Reload this handle first so the
+            // operation continues — and later snapshots — on the
+            // winner's state, never the stale view the fence refused.
+            Err(Error::LeaseSuperseded { .. }) => {
+                match index {
+                    Some(index) => self.mounts[index].engine.refresh()?,
+                    None => self.engine.refresh()?,
+                }
+                GitFold::Current
+            }
             other => other?,
         };
         released?;
@@ -1349,7 +1356,6 @@ impl Workspace {
         // apply. Reload alone — a fold claims this same lease and must
         // never nest inside it.
         self.reload_engines()?;
-        self.auto_snapshot()?;
         let fence = lease_fence(
             &self.coordination,
             lease_point(source),
@@ -1357,14 +1363,33 @@ impl Workspace {
             epoch,
             landing_lease_ttl_ms()?,
         );
-        let outcome = match source {
-            None => self.engine.land(tip, LANDED_BOOKMARK, &fence)?,
-            Some(name) => {
-                let index = self
-                    .mounts
+        // Settle the claimed line's outstanding edits under the fence —
+        // a superseded holder must not even snapshot onto the line it
+        // lost. Other sources settle on their own operations.
+        let index = match source {
+            None => None,
+            Some(name) => Some(
+                self.mounts
                     .iter()
                     .position(|mount| mount.name == name)
-                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?,
+            ),
+        };
+        let settled = match index {
+            None => self.engine.snapshot_fenced(&fence)?,
+            Some(index) => self.mounts[index].engine.snapshot_fenced(&fence)?,
+        };
+        if let Some(snapshot) = &settled {
+            let reference = match source {
+                Some(name) => format!("{name} {snapshot}"),
+                None => snapshot.clone(),
+            };
+            let entry = self.entry(Act::Snapshot, Some(reference))?;
+            self.journal.append(&entry)?;
+        }
+        let outcome = match index {
+            None => self.engine.land(tip, LANDED_BOOKMARK, &fence)?,
+            Some(index) => {
                 let bookmark = self.mounts[index]
                     .branch
                     .clone()
@@ -1509,6 +1534,21 @@ impl Workspace {
         if let Some(hold) = land_hold_ms()? {
             std::thread::sleep(Duration::from_millis(hold));
         }
+        // Reload under the lease: the step classifies the line — and
+        // `AlreadyStepped` erases the landing record — so the decision
+        // must read the line as the tenancy found it, not as this handle
+        // cached it.
+        match source {
+            None => self.engine.refresh()?,
+            Some(name) => {
+                let index = self
+                    .mounts
+                    .iter()
+                    .position(|mount| mount.name == name)
+                    .ok_or_else(|| Error::Engine(format!("no source is mounted at {name:?}")))?;
+                self.mounts[index].engine.refresh()?;
+            }
+        }
         let fence = lease_fence(
             &self.coordination,
             lease_point(source),
@@ -1538,7 +1578,7 @@ impl Workspace {
             StepBack::Stepped { restored } => {
                 // The landing is no longer a fact: a re-apply of this
                 // request must land the line anew, not skip it.
-                self.coordination.delete_landing(id.0, source)?;
+                self.coordination.delete_landing(id.0, source, landed)?;
                 let reference = match source {
                     Some(name) => format!("{name} {id} {restored}"),
                     None => format!("{id} {restored}"),
@@ -1551,7 +1591,7 @@ impl Workspace {
             StepBack::AlreadyStepped => {
                 // The step happened on a prior attempt that died before
                 // un-recording; repair the record, journal nothing more.
-                self.coordination.delete_landing(id.0, source)?;
+                self.coordination.delete_landing(id.0, source, landed)?;
                 Ok(None)
             }
             StepBack::LineMoved { head } => {
@@ -2560,11 +2600,20 @@ fn lease_fence(
 
 /// The `ATELIER_LANDING_LEASE_TTL_MS` test seam: the lease race tests
 /// shrink the TTL to supersede a stalled holder without waiting out the
-/// real one. A set but unparsable value refuses instead of silently
-/// keeping the default.
+/// real one. A set but unparsable or out-of-range value refuses instead
+/// of silently keeping the default — zero or negative would make every
+/// renewed lease instantly reclaimable.
 fn landing_lease_ttl_ms() -> Result<i64, Error> {
     match env::var("ATELIER_LANDING_LEASE_TTL_MS") {
-        Ok(value) => value.parse().map_err(config_err),
+        Ok(value) => {
+            let ttl: i64 = value.parse().map_err(config_err)?;
+            if !(1..=3_600_000).contains(&ttl) {
+                return Err(Error::Config(format!(
+                    "ATELIER_LANDING_LEASE_TTL_MS must be 1..=3600000, got {ttl}"
+                )));
+            }
+            Ok(ttl)
+        }
         Err(VarError::NotPresent) => Ok(LANDING_LEASE_TTL_MS),
         Err(error @ VarError::NotUnicode(_)) => Err(config_err(error)),
     }

@@ -35,10 +35,13 @@ fn set_actor(config_home: &Path) {
 }
 
 /// The race clock: the first holder stalls for `HOLD_MS` inside its
-/// lease while the rival claims after `SUPERSEDE_AT_MS`, well past the
-/// shrunken `TTL_MS`; margins absorb scheduler jitter.
+/// lease. The rival waits `CLAIM_AFTER_MS` — long enough for the stalled
+/// holder to reach its claim — then retries every `RETRY_MS` until the
+/// lease itself admits it: held claims refuse by name, and the first
+/// claim past the shrunken `TTL_MS` supersedes the stalled tenancy.
 const TTL_MS: u64 = 200;
-const SUPERSEDE_AT_MS: u64 = 600;
+const CLAIM_AFTER_MS: u64 = 500;
+const RETRY_MS: u64 = 50;
 const HOLD_MS: u64 = 1500;
 
 /// Arms the stall-and-supersede seams; dropping it disarms them even
@@ -103,6 +106,32 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .to_owned()
 }
 
+/// Open a second handle as a distinct actor: the rival's holder string
+/// differs from the stalled holder's, so its claims go through the
+/// expiry branch, never the same-holder one.
+#[expect(
+    unsafe_code,
+    reason = "set_var repoints the workspace config under env_lock"
+)]
+fn open_rival(root: &Path, rival_config: &Path, own_config: &Path) -> Workspace {
+    fs::create_dir_all(rival_config).expect("create rival config home");
+    fs::write(
+        rival_config.join("config.toml"),
+        "[actor]\nname = \"rival\"\nkind = \"human\"\n",
+    )
+    .expect("write rival config");
+    // SAFETY: as in `set_actor`; guarded by `env_lock()`.
+    unsafe {
+        std::env::set_var("ATELIER_CONFIG_HOME", rival_config);
+    }
+    let workspace = Workspace::open(root).expect("open the rival handle");
+    // SAFETY: as above.
+    unsafe {
+        std::env::set_var("ATELIER_CONFIG_HOME", own_config);
+    }
+    workspace
+}
+
 #[test]
 fn a_superseded_landing_refuses_by_name_and_a_rerun_completes() {
     let _guard = env_lock();
@@ -110,7 +139,8 @@ fn a_superseded_landing_refuses_by_name_and_a_rerun_completes() {
     set_actor(config.path());
     let root = tempfile::tempdir().unwrap();
     let mut ws_a = Workspace::init(root.path()).unwrap();
-    let mut ws_b = Workspace::open(root.path()).unwrap();
+    let rival_config = tempfile::tempdir().unwrap();
+    let mut ws_b = open_rival(root.path(), rival_config.path(), config.path());
 
     let session_a = ws_a
         .open_session(&agent("one"), &instruction("land file a"))
@@ -126,10 +156,17 @@ fn a_superseded_landing_refuses_by_name_and_a_rerun_completes() {
         let outcome = ws_a.land(session_a.id);
         (ws_a, outcome)
     });
-    std::thread::sleep(Duration::from_millis(SUPERSEDE_AT_MS));
-    // The stalled holder's lease expired; this claim supersedes its
-    // tenancy and lands.
-    let outcome = ws_b.land(session_b.id).unwrap();
+    std::thread::sleep(Duration::from_millis(CLAIM_AFTER_MS));
+    // The rival rides the lease, not the clock: held claims refuse until
+    // the stall outlives the TTL, then the first claim supersedes.
+    let outcome = loop {
+        match ws_b.land(session_b.id) {
+            Err(Error::LeaseHeld { .. }) => {
+                std::thread::sleep(Duration::from_millis(RETRY_MS));
+            }
+            other => break other.unwrap(),
+        }
+    };
     assert!(
         matches!(outcome, GateOutcome::Landed { .. }),
         "got: {outcome:?}"
@@ -164,6 +201,16 @@ fn a_superseded_landing_refuses_by_name_and_a_rerun_completes() {
         fs::read_to_string(root.path().join("b.txt")).unwrap(),
         "b\n"
     );
+    // The land acts attribute in order: the rival's session landed
+    // first, the rerun second — the stalled tenancy published nothing.
+    let landers: Vec<String> = ws_a
+        .journal(50)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.act == Act::Land)
+        .map(|entry| entry.actor_name)
+        .collect();
+    assert_eq!(landers, vec!["one".to_owned(), "two".to_owned()]);
 }
 
 #[test]
@@ -173,7 +220,8 @@ fn a_superseded_undo_refuses_by_name_and_the_line_steps_once() {
     set_actor(config.path());
     let root = tempfile::tempdir().unwrap();
     let mut ws_a = Workspace::init(root.path()).unwrap();
-    let mut ws_b = Workspace::open(root.path()).unwrap();
+    let rival_config = tempfile::tempdir().unwrap();
+    let mut ws_b = open_rival(root.path(), rival_config.path(), config.path());
 
     let session = ws_a
         .open_session(&agent("one"), &instruction("land the note"))
@@ -192,8 +240,20 @@ fn a_superseded_undo_refuses_by_name_and_the_line_steps_once() {
         let outcome = ws_a.undo(request);
         (ws_a, outcome)
     });
-    std::thread::sleep(Duration::from_millis(SUPERSEDE_AT_MS));
-    ws_b.undo(request).unwrap();
+    std::thread::sleep(Duration::from_millis(CLAIM_AFTER_MS));
+    // The rival rides the lease, not the clock: held claims refuse until
+    // the stall outlives the TTL, then the first claim supersedes.
+    loop {
+        match ws_b.undo(request) {
+            Err(Error::LeaseHeld { .. }) => {
+                std::thread::sleep(Duration::from_millis(RETRY_MS));
+            }
+            other => {
+                other.unwrap();
+                break;
+            }
+        }
+    }
     let (mut ws_a, stalled_outcome) = stalled.join().expect("join the stalled holder");
     let Err(error) = stalled_outcome else {
         panic!("the superseded holder must not publish");
@@ -204,17 +264,18 @@ fn a_superseded_undo_refuses_by_name_and_the_line_steps_once() {
     );
     drop(seams);
 
-    // The line stepped exactly once: the landed file is gone, and one
-    // undo act is journaled — a second step would have republished the
-    // undone head.
+    // The line stepped exactly once, by the rival: the landed file is
+    // gone, and one undo act carries the rival's name — a second step
+    // would have republished the undone head under the stalled actor.
     assert!(!root.path().join("note.txt").exists());
-    let undos = ws_a
+    let undoers: Vec<String> = ws_a
         .journal(50)
         .unwrap()
         .into_iter()
         .filter(|entry| entry.act == Act::Undo)
-        .count();
-    assert_eq!(undos, 1);
+        .map(|entry| entry.actor_name)
+        .collect();
+    assert_eq!(undoers, vec!["rival".to_owned()]);
 }
 
 #[test]
@@ -230,7 +291,8 @@ fn a_superseded_fold_skips_and_the_line_folds_once() {
     git(repo.path(), &["add", "."]);
     git(repo.path(), &["commit", "-qm", "the pre-attach commit"]);
     ws_a.attach_mount(repo.path(), "sdk").unwrap();
-    let mut ws_b = Workspace::open(root.path()).unwrap();
+    let rival_config = tempfile::tempdir().unwrap();
+    let mut ws_b = open_rival(root.path(), rival_config.path(), config.path());
     let sdk = root.path().join("sdk");
 
     // Stage the drift both handles will race to fold: a message rewrite
@@ -245,8 +307,26 @@ fn a_superseded_fold_skips_and_the_line_folds_once() {
         let outcome = ws_a.status();
         (ws_a, outcome)
     });
-    std::thread::sleep(Duration::from_millis(SUPERSEDE_AT_MS));
-    ws_b.status().unwrap();
+    std::thread::sleep(Duration::from_millis(CLAIM_AFTER_MS));
+    // A held fold skips instead of refusing, so the rival rides the
+    // journal: it retries until its own fold lands the pull act.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        ws_b.status().unwrap();
+        let folded = ws_b
+            .journal(50)
+            .unwrap()
+            .into_iter()
+            .any(|entry| entry.act == Act::Pull);
+        if folded {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rival never folded the staged drift"
+        );
+        std::thread::sleep(Duration::from_millis(RETRY_MS));
+    }
     let (mut ws_a, stalled_outcome) = stalled.join().expect("join the stalled holder");
     // A superseded fold skips exactly like a held point: the rival
     // folded the line, and the stalled operation still answers.
@@ -254,11 +334,14 @@ fn a_superseded_fold_skips_and_the_line_folds_once() {
     drop(seams);
 
     assert_eq!(git(&sdk, &["rev-parse", "refs/heads/master"]), amended);
-    let pulls = ws_a
+    // Exactly one fold, journaled by the rival: had the stalled handle
+    // published the fold, the pull would carry the stalled actor.
+    let pullers: Vec<String> = ws_a
         .journal(50)
         .unwrap()
         .into_iter()
         .filter(|entry| entry.act == Act::Pull)
-        .count();
-    assert_eq!(pulls, 1);
+        .map(|entry| entry.actor_name)
+        .collect();
+    assert_eq!(pullers, vec!["rival".to_owned()]);
 }

@@ -305,12 +305,19 @@ impl Coordination {
 
     /// Un-record one source's landing under the request: an undo stepped
     /// the line back, so the fact no longer holds and a re-apply must
-    /// land it anew (ADR-0011).
-    pub fn delete_landing(&self, request_id: i64, source: Option<&str>) -> Result<(), Error> {
+    /// land it anew (ADR-0011). The snapshot names the fact being erased —
+    /// a stale writer whose landing was already replaced deletes nothing.
+    pub fn delete_landing(
+        &self,
+        request_id: i64,
+        source: Option<&str>,
+        snapshot_id: &str,
+    ) -> Result<(), Error> {
         self.conn
             .execute(
-                "DELETE FROM request_landings WHERE request_id = ?1 AND source = ?2",
-                params![request_id, source.unwrap_or(ROOT_MOUNT)],
+                "DELETE FROM request_landings
+                 WHERE request_id = ?1 AND source = ?2 AND snapshot_id = ?3",
+                params![request_id, source.unwrap_or(ROOT_MOUNT), snapshot_id],
             )
             .map_err(engine_err)?;
         Ok(())
@@ -415,6 +422,7 @@ impl Coordination {
         now_ms: i64,
         ttl_ms: i64,
     ) -> Result<LeaseClaim, Error> {
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
         loop {
             let claimed = self
                 .conn
@@ -425,7 +433,7 @@ impl Coordination {
                          epoch = lease.epoch + 1
                      WHERE lease.expires_at_ms <= ?4 OR lease.holder = excluded.holder
                      RETURNING epoch",
-                    params![point, holder, now_ms + ttl_ms, now_ms],
+                    params![point, holder, expires_at_ms, now_ms],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()
@@ -467,12 +475,13 @@ impl Coordination {
         now_ms: i64,
         ttl_ms: i64,
     ) -> Result<bool, Error> {
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
         let renewed = self
             .conn
             .execute(
                 "UPDATE lease SET expires_at_ms = ?1
                  WHERE point = ?2 AND holder = ?3 AND epoch = ?4",
-                params![now_ms + ttl_ms, point, holder, epoch],
+                params![expires_at_ms, point, holder, epoch],
             )
             .map_err(engine_err)?;
         Ok(renewed == 1)
@@ -526,6 +535,14 @@ fn collect<T>(rows: impl Iterator<Item = Result<T, rusqlite::Error>>) -> Result<
         out.push(row.map_err(engine_err)?);
     }
     Ok(out)
+}
+
+/// When a tenancy claimed or renewed now expires. Checked: an expiry
+/// past `i64` would wrap into the past and hand the point away.
+fn lease_expiry(now_ms: i64, ttl_ms: i64) -> Result<i64, Error> {
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| Error::Engine(format!("lease expiry overflows: {now_ms} + {ttl_ms}")))
 }
 
 #[cfg(test)]
@@ -693,6 +710,28 @@ mod tests {
                 .unwrap()
         );
     }
+
+    /// A store stamped by a newer atelier refuses to open: this binary
+    /// cannot see the newer schema's rules — the lease fence above all —
+    /// and guessing would bypass them.
+    #[test]
+    fn a_newer_store_refuses_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        drop(Coordination::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        drop(conn);
+
+        let Err(error) = Coordination::open(&path) else {
+            panic!("a newer store must refuse to open");
+        };
+        assert!(
+            error.to_string().contains("newer than this atelier"),
+            "got: {error}"
+        );
+    }
+
     #[test]
     fn a_request_move_names_its_prior_state_or_loses() {
         let (_dir, coordination) = coordination();
