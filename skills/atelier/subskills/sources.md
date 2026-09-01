@@ -17,6 +17,11 @@ keeps its own engine and history. Git mounts preserve history and remain real
 repositories; every landing moves the adopted branch, or the `atelier`
 bookmark when no branch was checked out.
 
+Before copying a local Git source, `attach` prints its HEAD, branch, tracked
+modification count, untracked file count, and estimated untracked bytes. It
+refuses dirty sources by default. Prefer a clean clone; use `--allow-dirty`
+only when every reported change belongs in the workspace.
+
 `attach` copies what Atelier can version: it applies ignore rules by directory,
 skips nested repositories, preserves symlinks, and keeps the root repository's
 `.git`. Build caches and linked worktrees should therefore stay outside the

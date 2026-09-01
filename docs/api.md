@@ -162,7 +162,7 @@ error face — its writes land in a lineage no restore selects.
 
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src>` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]` · `atelier update`
+`atelier init` · `atelier attach <src> [--allow-dirty]` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]` · `atelier update`
 
 `session open` prints the session id and its working-copy path. Edit that path
 with normal tools over any process lifetime. Inspect it with `session diff`;
@@ -226,6 +226,7 @@ Schema versioning from day one: `schema = 1`; SQLite `user_version` for the jour
 
 ### Attach
 - Folder already a git repo → LocalGit source: preserve history, colocate. Already jj → adopt. Inside another workspace → `NestedWorkspace`. LFS git source → loud `LfsSourceUnsupported` (ADR-0002). Re-attach → `AlreadyAttached`. A `.git` FILE (linked worktree, submodule checkout) → loud `LinkedWorktreeUnsupported` naming the owning repository — its git state is not the folder's to adopt, and a silent folder import would read every file as added.
+- Before a local Git attach copies content, the CLI prints the checked-out HEAD and branch, tracked modification count, untracked file count, and estimated untracked bytes. Any dirty state refuses by default and recommends a clean clone; `--allow-dirty` is the explicit choice to adopt it.
 - **Out-of-band git in a mount** (a commit, branch move, or push with plain git) → folds into the line on the next workspace operation under the line's landing lease, journaled as a pull: follow-up work fast-forwards, a recommit of the line's own content becomes the line, divergent content merges through the common ancestor into one `fold` state. Outstanding line edits snapshot first; open sessions keep their fork points and merge at landing, exactly as when another session lands first. Moved content that conflicts with the line refuses by name (`GitFoldConflicted { branch }`): make the working copy agree with the branch, then retry. The next landing always exports cleanly.
 
 ### Documents & packages

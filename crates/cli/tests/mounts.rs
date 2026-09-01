@@ -32,6 +32,27 @@ fn atelier(config_home: &Path, current_dir: &Path) -> Command {
     command
 }
 
+fn git(path: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .env("GIT_AUTHOR_NAME", "Atelier Test")
+        .env("GIT_AUTHOR_EMAIL", "atelier@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Atelier Test")
+        .env("GIT_COMMITTER_EMAIL", "atelier@example.invalid")
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git fixture output is utf-8")
+        .trim()
+        .to_owned()
+}
+
 fn stdout_lines(assert: &assert_cmd::assert::Assert) -> Vec<String> {
     String::from_utf8(assert.get_output().stdout.clone())
         .expect("stdout is utf-8")
@@ -165,5 +186,60 @@ fn two_projects_live_under_one_workspace_with_their_own_histories() {
             .iter()
             .any(|line| line.contains("snapshot  docs ") || line.contains("snapshot  docs")),
         "no mounted snapshot act: {entries:#?}"
+    );
+}
+
+#[test]
+fn dirty_git_sources_refuse_until_the_actor_accepts_the_preflight() {
+    let config_home = TempDir::new().expect("create config tempdir");
+    write_actor_config(config_home.path());
+    let workspace = TempDir::new().expect("create workspace tempdir");
+    atelier(config_home.path(), workspace.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let source = TempDir::new().expect("create Git source");
+    git(source.path(), &["init", "-q", "-b", "main"]);
+    fs::write(source.path().join("lib.rs"), "pub fn clean() {}\n").expect("write tracked file");
+    git(source.path(), &["add", "lib.rs"]);
+    git(source.path(), &["commit", "-qm", "initial source"]);
+    let head = git(source.path(), &["rev-parse", "HEAD"]);
+    fs::write(source.path().join("lib.rs"), "pub fn dirty() {}\n").expect("modify tracked file");
+    fs::write(source.path().join("scratch.bin"), b"123456").expect("write untracked file");
+
+    let preflight = format!(
+        "source git: HEAD {head}; branch main\nsource git state: tracked modifications: 1; untracked files: 1; estimated untracked bytes: 6\n"
+    );
+    atelier(config_home.path(), workspace.path())
+        .args(["attach", source.path().to_str().expect("utf-8 source path")])
+        .args(["--mount", "sdk"])
+        .assert()
+        .failure()
+        .stdout(preflight.clone())
+        .stderr(
+            "error: local Git source is dirty; attach a clean clone or pass --allow-dirty to adopt these changes\n",
+        );
+    assert!(
+        !workspace.path().join("sdk").exists(),
+        "a refused preflight must not create the mount"
+    );
+
+    atelier(config_home.path(), workspace.path())
+        .args(["attach", source.path().to_str().expect("utf-8 source path")])
+        .args(["--mount", "sdk", "--allow-dirty"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "{preflight}warning: --allow-dirty adopts the reported tracked and untracked changes\nattached local-git {} at sdk\n",
+            source.path().display()
+        ));
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("sdk/lib.rs")).expect("read adopted tracked file"),
+        "pub fn dirty() {}\n"
+    );
+    assert_eq!(
+        fs::read(workspace.path().join("sdk/scratch.bin")).expect("read adopted untracked file"),
+        b"123456"
     );
 }
