@@ -6,7 +6,9 @@ an unrelated checkout:
 ```sh
 cd ~/workspaces/payments
 atelier manifest
-atelier run   --summary "Fix webhook replay ordering and verify the regression"   --land   -- omp
+atelier run --actor-name "coding-agent" --actor-kind agent \
+  --summary "Fix webhook replay ordering and verify the regression" \
+  --land -- omp
 atelier journal
 ```
 

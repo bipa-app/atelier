@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use atelier_hosted::{HostedNode, NodeClaim, NodePaths, ReleaseOutcome, ReplicateOutcome};
 use atelier_sdk::{
-    GateOutcome, JournalEntry, PullOutcome, RequestId, SessionId, SyncOutcome, WatchEvent,
-    WatchStop, Workspace, printable, render_diff,
+    Actor, ActorKind, GateOutcome, JournalEntry, PullOutcome, RequestId, SessionId, SyncOutcome,
+    WatchEvent, WatchStop, Workspace, printable, render_diff,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 const JOURNAL_LIMIT: usize = 100;
 const HISTORY_LIMIT: usize = 100;
@@ -45,6 +45,29 @@ impl LocalGitPreflight {
                 self.tracked_modifications, self.untracked_files, self.untracked_bytes
             ),
         ]
+    }
+}
+
+#[derive(Debug, Args)]
+struct ActorArgs {
+    /// Attribute the session to this actor instead of the configured actor.
+    #[arg(long, requires = "actor_kind")]
+    actor_name: Option<String>,
+    /// Attribute the session as human, agent, or automation.
+    #[arg(long, requires = "actor_name")]
+    actor_kind: Option<ActorKind>,
+}
+
+impl ActorArgs {
+    fn resolve(self, fallback: &Actor) -> Result<Actor> {
+        match (self.actor_name, self.actor_kind) {
+            (Some(name), Some(kind)) if !name.is_empty() => Ok(Actor { name, kind }),
+            (Some(_), Some(_)) => bail!("actor name must not be empty"),
+            (None, None) => Ok(fallback.clone()),
+            (Some(_), None) | (None, Some(_)) => {
+                bail!("actor name and kind must be provided together")
+            }
+        }
     }
 }
 
@@ -141,6 +164,8 @@ enum Command {
         /// Land the session's change when the command succeeds.
         #[arg(long)]
         land: bool,
+        #[command(flatten)]
+        actor: ActorArgs,
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
@@ -185,6 +210,8 @@ enum SessionCommand {
         /// One line on what this session is doing and why.
         #[arg(long)]
         summary: String,
+        #[command(flatten)]
+        actor: ActorArgs,
     },
     /// Show a session's change against the shared line.
     Diff { session: String },
@@ -207,7 +234,7 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::History { source } => history(source.as_deref()),
         Command::Sessions => sessions(),
         Command::Session { command } => match command {
-            SessionCommand::Open { summary } => open_session(&summary),
+            SessionCommand::Open { summary, actor } => open_session(&summary, actor),
             SessionCommand::Diff { session } => session_diff(&session),
             SessionCommand::Abandon { session } => abandon_session(&session),
         },
@@ -223,8 +250,9 @@ pub fn execute(cli: Cli) -> Result<Vec<String>> {
         Command::Run {
             summary,
             land,
+            actor,
             command,
-        } => run_in_session(summary.as_deref(), land, &command),
+        } => run_in_session(summary.as_deref(), land, actor, &command),
         Command::Serve {
             mcp_stdio,
             http,
@@ -518,9 +546,9 @@ fn sessions() -> Result<Vec<String>> {
         .collect())
 }
 
-fn open_session(summary: &str) -> Result<Vec<String>> {
+fn open_session(summary: &str, actor: ActorArgs) -> Result<Vec<String>> {
     let mut workspace = open_current()?;
-    let actor = workspace.actor().clone();
+    let actor = actor.resolve(workspace.actor())?;
     let instruction = atelier_sdk::Instruction {
         summary: summary.to_owned(),
         run_ref: None,
@@ -641,10 +669,11 @@ fn sync(source: Option<&str>, force: bool) -> Result<Vec<String>> {
 fn run_in_session(
     summary: Option<&str>,
     land_after: bool,
+    actor: ActorArgs,
     command: &[String],
 ) -> Result<Vec<String>> {
     let mut workspace = open_current()?;
-    let actor = workspace.actor().clone();
+    let actor = actor.resolve(workspace.actor())?;
     let summary = match summary {
         Some(summary) => summary.to_owned(),
         None => format!("run: {}", command.join(" ")),

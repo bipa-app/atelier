@@ -6,7 +6,8 @@ cd product-workspace
 atelier init
 atelier attach ~/work/api --mount api
 atelier attach ~/work/web --mount web
-atelier session open --summary "Rename the shared plan across API and web"
+atelier session open --actor-name "coding-agent" --actor-kind agent \
+  --summary "Rename the shared plan across API and web"
 ```
 
 Edit `api/...` and `web/...` inside the printed working copy, then:

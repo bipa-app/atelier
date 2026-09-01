@@ -162,12 +162,17 @@ error face — its writes land in a lineage no restore selects.
 
 ## 4. CLI (human face)
 
-`atelier init` · `atelier attach <src> [--allow-dirty]` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text>` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]` · `atelier update`
+`atelier init` · `atelier attach <src> [--allow-dirty]` · `atelier status` · `atelier manifest` · `atelier history` · `atelier diff` · `atelier journal` · `atelier sessions` · `atelier session open --summary <text> [--actor-name <name> --actor-kind <kind>]` · `atelier session diff <session>` · `atelier session abandon <session>` · `atelier requests` · `atelier approve <id>` · `atelier reject <id>` · `atelier land <session>` · `atelier run [--actor-name <name> --actor-kind <kind>] -- <command>` · `atelier sync <source>` · `atelier pull <source>` · `atelier watch` · `atelier undo <request>` · `atelier serve [--mcp-stdio | --http] [--hosted <bucket-url>]` · `atelier update`
 
 `session open` prints the session id and its working-copy path. Edit that path
 with normal tools over any process lifetime. Inspect it with `session diff`;
 `land` passes it through the gate, while `session abandon` closes it without
 landing.
+
+`session open` and `run` accept `--actor-name` and `--actor-kind` together.
+The override persists on the session; its snapshots, landing request,
+self-approval, and landing use that actor instead of the workstation's
+configured actor.
 
 `update` moves this install to the latest release by running the bundled
 `atelier-ws-update` the install script places beside the binary; without one
