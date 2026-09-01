@@ -272,6 +272,125 @@ fn git_repo(dir: &Path) -> Vec<String> {
 }
 
 #[test]
+fn attach_copies_what_the_engine_versions_nothing_more() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_actor(config.path());
+    let root = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(root.path()).unwrap();
+
+    // A repo shaped like a real project: tracked content, a repo-ignored
+    // build dir, a linked sibling worktree (bipa's `.worktrees/` shape —
+    // a `.git` file pointing into the origin's worktree store), a nested
+    // clone (a foreign repository inside the tree), and a symlink.
+    let repo = tempfile::tempdir().unwrap();
+    git_repo(repo.path());
+    fs::write(repo.path().join(".gitignore"), "target/\n").expect("write gitignore");
+    fs::create_dir_all(repo.path().join("target/debug")).expect("make build dir");
+    fs::write(
+        repo.path().join("target/debug/artifact.bin"),
+        "build output\n",
+    )
+    .expect("write build output");
+    let worktrees = tempfile::tempdir().unwrap();
+    let added = std::process::Command::new("git")
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(worktrees.path().join("feature"))
+        .current_dir(repo.path())
+        .output()
+        .expect("add linked worktree");
+    assert!(added.status.success(), "git worktree add: {added:?}");
+    std::fs::rename(worktrees.path(), repo.path().join(".worktrees")).expect("nest worktrees");
+    fs::write(
+        repo.path().join(".worktrees/feature/checkout.txt"),
+        "a sibling worktree's file\n",
+    )
+    .expect("write worktree file");
+    let nested = tempfile::tempdir().unwrap();
+    let clone = std::process::Command::new("git")
+        .args(["clone", "-q", repo.path().to_string_lossy().as_ref(), "."])
+        .current_dir(nested.path())
+        .output()
+        .expect("clone the nested repo");
+    assert!(clone.status.success());
+    std::fs::rename(nested.path(), repo.path().join("vendor-nested")).expect("nest the clone");
+    std::os::unix::fs::symlink("lib.rs", repo.path().join("lib-link.rs")).expect("make symlink");
+
+    ws.attach_mount(repo.path(), "sdk").unwrap();
+    let sdk = root.path().join("sdk");
+
+    // What the engine versions arrives: tracked content, the .gitignore
+    // rule itself, and the symlink as a symlink.
+    assert_eq!(
+        fs::read_to_string(sdk.join("lib.rs")).unwrap(),
+        "pub fn lib() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sdk.join(".gitignore")).unwrap(),
+        "target/\n"
+    );
+    assert!(sdk.join("lib-link.rs").is_file());
+    assert_eq!(
+        fs::read_link(sdk.join("lib-link.rs")).unwrap(),
+        std::path::PathBuf::from("lib.rs")
+    );
+    // What snapshotting skips never copies: the ignored build output and
+    // the nested repository whole. The linked worktree is a nested
+    // repository — skipped whole, before any directory scaffolds, so the
+    // `.worktrees` dir never even appears.
+    assert!(!sdk.join("target").exists());
+    assert!(!sdk.join("vendor-nested").exists());
+    assert!(!sdk.join(".worktrees").exists());
+    // And the adoption still carries the repository itself: plain git
+    // reads the adopted history from the mount.
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline", "master"])
+        .current_dir(&sdk)
+        .output()
+        .expect("git log in the mount");
+    assert!(log.status.success(), "git log: {log:?}");
+
+    // The copy brought exactly the versioned set, nothing more: the
+    // mount's working copy holds precisely the tracked files, the new
+    // ignore rule, and the symlink — a recursive listing pins it whole.
+    let listing = |sdk: &Path| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut pending = vec![sdk.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name();
+                if name == ".git" || name == ".jj" {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let rel = path.strip_prefix(sdk).unwrap().to_string_lossy();
+                    out.push(rel.into_owned());
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    assert_eq!(
+        listing(&sdk),
+        vec![
+            ".gitignore".to_owned(),
+            "README.md".to_owned(),
+            "lib-link.rs".to_owned(),
+            "lib.rs".to_owned(),
+        ]
+    );
+    // The worktree dir never even scaffolded: the nested-repo skip fires
+    // before any directory is created, so nothing of the sibling's
+    // arrives — not one byte, not one empty dir.
+    assert!(!sdk.join(".worktrees").exists());
+}
+
+#[test]
 fn a_git_repo_source_is_adopted_with_its_history() {
     let _guard = env_lock();
     let config = tempfile::tempdir().unwrap();

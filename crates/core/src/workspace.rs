@@ -22,6 +22,7 @@ use crate::config::{
 use crate::coordination::{Coordination, LeaseClaim, RequestRow, SessionRow};
 use crate::engine::{
     DiffSides, Engine, FileBlob, GitFold, LADDER_FILE_SIZE_MAX, LandOutcome, Side, StepBack,
+    copy_versioned_tree,
 };
 use crate::error::{Error, config_err, engine_err};
 use crate::journal::{Act, Journal, JournalEntry};
@@ -277,7 +278,7 @@ impl Workspace {
 
         self.auto_snapshot()?;
 
-        copy_tree(folder, &self.root, &SKIP_NAMES)?;
+        copy_versioned_tree(folder, &self.root, false)?;
         let source = Source {
             kind: SourceKind::LocalFolder,
             path: folder.to_path_buf(),
@@ -400,14 +401,14 @@ impl Workspace {
         fs::create_dir_all(mount_dir)?;
         let adopts_git = folder.join(".git").is_dir();
         let (kind, mut engine) = if adopts_git {
-            copy_tree(folder, mount_dir, &[".atelier", ".jj"])?;
+            copy_versioned_tree(folder, mount_dir, true)?;
             (
                 SourceKind::LocalGit,
                 Engine::adopt_git(mount_dir, &self.actor, &[])?,
             )
         } else {
             let engine = Engine::init(mount_dir, &self.actor, &[])?;
-            copy_tree(folder, mount_dir, &SKIP_NAMES)?;
+            copy_versioned_tree(folder, mount_dir, false)?;
             (SourceKind::LocalFolder, engine)
         };
         let snapshot = engine.snapshot()?;
@@ -2526,32 +2527,6 @@ fn folder_uses_lfs(folder: &Path) -> Result<bool, Error> {
     }
     let text = fs::read_to_string(&gitattributes)?;
     Ok(text.contains("filter=lfs"))
-}
-
-/// Copy `source` into `target`, skipping `skips` at any depth. The import
-/// path skips every engine-internal name; the adoption path keeps `.git` —
-/// the repository itself is the content. An explicit work stack bounds the
-/// walk by entry count, never call depth.
-fn copy_tree(source: &Path, target: &Path, skips: &[&str]) -> Result<(), Error> {
-    let mut pending = vec![(source.to_path_buf(), target.to_path_buf())];
-    while let Some((from_dir, to_dir)) = pending.pop() {
-        for entry in fs::read_dir(&from_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if skips.iter().any(|skip| name == **skip) {
-                continue;
-            }
-            let from = entry.path();
-            let to = to_dir.join(&name);
-            if from.is_dir() {
-                fs::create_dir_all(&to)?;
-                pending.push((from, to));
-            } else {
-                fs::copy(&from, &to)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The file at `path` inside `working_copy`: a relative path that never
