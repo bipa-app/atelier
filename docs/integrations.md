@@ -67,8 +67,8 @@ every harness, including ones with no plugin system at all.
 
 ## The plugin: one repo, every installer
 
-This repository is itself a passive plugin — the `atelier-workspace-loop`
-skill plus, for Claude Code, a SessionStart hook that injects
+This repository is itself a passive plugin — the `atelier` skill (invoked as
+`/use:atelier` in Oh My Pi) plus, for Claude Code, a SessionStart hook that injects
 `atelier manifest` as context when the project is a workspace (silent
 anywhere else).
 
@@ -95,7 +95,7 @@ claude --plugin-dir ~/work/atelier                     # local
 codex without skills.sh: copy the skill directly:
 
 ```sh
-cp -r skills/atelier-workspace-loop "${CODEX_HOME:-$HOME/.codex}/skills/"
+cp -r skills/atelier "${CODEX_HOME:-$HOME/.codex}/skills/"
 ```
 
 ## Claude Code
