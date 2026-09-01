@@ -1,14 +1,14 @@
 {
   "name": "atelier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Versioned workspaces for humans and agents - the workspace loop skill for coding agents",
+  "description": "Versioned workspaces for humans and agents - operational subskills, examples, scripts, and feedback reporting",
   "pi": {
     "name": "atelier",
-    "description": "Work inside atelier workspaces: sessions, gated landing, journal"
+    "description": "Use Atelier effectively: sessions, sources, landing recovery, serving, and feedback"
   },
   "omp": {
     "name": "atelier",
-    "description": "Work inside atelier workspaces: sessions, gated landing, journal"
+    "description": "Use Atelier effectively: sessions, sources, landing recovery, serving, and feedback"
   }
 }

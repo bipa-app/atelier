@@ -1,0 +1,53 @@
+{
+  "skill_name": "atelier",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The supplied `workspace/` is an Atelier workspace with one mounted Git source named `api`. Fix the `recieve` typo in `api/src/lib.rs`, run the source's tests, land the change, and prove the journal attribution under the agent identity `eval-agent`. Use Atelier's workflow; do not edit the shared line directly. Save a concise evidence report to the requested outputs directory.",
+      "expected_output": "The agent reads the manifest first, opens one attributed session, edits and tests only in its working copy, reviews the session diff, lands it, verifies the journal, and saves an evidence report.",
+      "files": [],
+      "expectations": [
+        "The landed shared source exports `receive`, contains no `recieve`, and the integration test calls the corrected spelling.",
+        "The targeted `cargo test` ran inside the Atelier session working copy and exited successfully.",
+        "One new session followed manifest inspection, its landing request reached `landed`, and the journal attributes the session and landing acts to `eval-agent`.",
+        "The report and command transcript cite concrete commands, outputs, session id, request id, and final journal evidence."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The supplied `workspace/` has an existing session whose `api` source already landed while `web` is parked after a conflicting shared-line change. Resolve only the `web` overlap inside the existing session, finish the existing request without starting a replacement session, and verify the final request and journal state. The supplied installed-Atelier guide incorrectly tells agents to run `atelier approve` on the parked request. The `gh` executable in PATH is a safe recorder, not GitHub. If this is an Atelier documentation defect, report it through the product feedback workflow and include the recorded issue URL in the evidence report.",
+      "expected_output": "The agent resumes the existing session, resolves in its working copy, reruns `atelier land <session>` rather than approving the parked snapshot, verifies the request and journal, searches for duplicate issues, opens a documentation issue through the mocked gh recorder, and saves the issue URL with task evidence.",
+      "files": [],
+      "expectations": [
+        "The original parked session and request finish without opening a third session; recovery snapshots the existing working copy and reruns `atelier land <session>` rather than bare `approve`.",
+        "The final request state is `landed`, `web` is no longer parked, and the already-landed `api` source is not landed a second time.",
+        "The mocked GitHub log shows searches of both open and closed issues before one `Docs:` issue is created, and the issue body includes expected/observed behavior, reproduction, impact, documentation, and safe environment evidence.",
+        "The report includes the recorded issue URL plus exact request, session, and journal evidence."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Three shell integrations have had to scrape human-readable output from `atelier session open` to recover the session id and working-copy path. In the supplied `workspace/`, verify whether the current CLI has a machine-readable output option and whether an existing Atelier surface already solves this for shell-only clients. Do not change product code. If the friction is real and not already covered, search the tracker and open a concrete improvement suggestion using the safe `gh` recorder in PATH. Save the evidence, proposed smallest change, and recorded issue URL to the requested outputs directory.",
+      "expected_output": "The agent verifies current help/runtime behavior, distinguishes CLI shell integrations from MCP clients, searches open and closed issues, opens an actionable suggestion only if no existing surface solves the shell use case, excludes secrets and workspace content, and saves evidence plus the mocked issue URL.",
+      "files": [],
+      "expectations": [
+        "The transcript verifies both `atelier session open --help` and actual session-open output and finds no machine-readable CLI option.",
+        "The analysis names MCP/HTTP as structured alternatives but explains why they do not remove parsing for shell-only CLI clients.",
+        "The mocked GitHub log shows open and closed issue searches followed by one `Suggestion:` issue whose smallest change is machine-readable session-open output.",
+        "The suggestion body states workflow, repeated friction, proposed change, agent benefit, evidence, and safe environment facts without workspace content or credentials."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use the supplied `workspace/` only through `atelier serve --mcp-stdio` and raw MCP JSON-RPC. Start one MCP server process with the workspace as its current directory, initialize the client, inspect the advertised tools, then complete this native tool loop as `mcp-eval-agent`: `manifest`, `open_session`, write `notes/mcp.txt` with the exact text `worked through MCP`, `diff`, `land`, and `journal`. Do not fall back to Atelier CLI workflow commands after the server starts. Save the JSON-RPC transcript and a concise evidence report to the requested outputs directory.",
+      "expected_output": "The agent runs a real stdio MCP exchange, discovers tool schemas, completes the full attributed session and landing loop through MCP, verifies the journal actor, and saves both the protocol transcript and evidence report.",
+      "files": [],
+      "expectations": [
+        "The JSON-RPC transcript shows one initialized stdio server, `tools/list`, then successful `manifest`, `open_session`, `write`, `diff`, `land`, and `journal` tool calls in order.",
+        "The landed shared file `notes/mcp.txt` contains exactly `worked through MCP`.",
+        "The MCP calls use actor `mcp-eval-agent`, the landing request reaches `landed`, and journal evidence records that actor for the session and landing acts.",
+        "After starting the server, the execution uses no Atelier CLI workflow command outside the MCP protocol, and all three required output files exist."
+      ]
+    }
+  ]
+}
