@@ -16,7 +16,7 @@ use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::{RefName, WorkspaceName, WorkspaceNameBuf};
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo, RepoLoader};
-use jj_lib::repo_path::RepoPath;
+use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathComponent};
 use jj_lib::rewrite::{merge_commit_trees, rebase_commit};
 use jj_lib::settings::UserSettings;
 use jj_lib::transaction::Transaction;
@@ -1299,6 +1299,91 @@ fn snapshot_options(base_ignores: Arc<GitIgnoreFile>) -> SnapshotOptions<'static
         max_new_file_size: NEW_FILE_SIZE_MAX,
     }
 }
+
+/// Copy `source` into `target` exactly as a snapshot would version it
+/// (ADR-0002: adopt, never import — and never adopt what snapshotting
+/// would skip). The walk is the snapshot's own walk: per-directory
+/// `.gitignore` chains, nested repositories skipped whole (jj#4349 — a
+/// directory holding a `.git` is not this working copy's content), and
+/// the engine-internal names at any depth. The one deliberate widening:
+/// the adoption copy also carries `target/.git` itself — the repository
+/// is the content being adopted. `keep_git` at the root only; a nested
+/// repo's `.git` is never ours to copy.
+pub(crate) fn copy_versioned_tree(
+    source: &Path,
+    target: &Path,
+    keep_git: bool,
+) -> Result<(), Error> {
+    let mut pending = vec![(
+        source.to_path_buf(),
+        target.to_path_buf(),
+        RepoPathBuf::root(),
+        GitIgnoreFile::empty(),
+    )];
+    while let Some((from_dir, to_dir, dir, ignores)) = pending.pop() {
+        let ignores = ignores
+            .chain_with_file(&dir, from_dir.join(".gitignore"))
+            .map_err(engine_err)?;
+        for entry in fs::read_dir(&from_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if SKIP_NAMES.contains(&name)
+                && !(keep_git && dir == RepoPathBuf::root() && name == ".git")
+            {
+                continue;
+            }
+            let Ok(component) = RepoPathComponent::new(name) else {
+                continue;
+            };
+            let path = dir.join(component);
+            let from = entry.path();
+            let to = to_dir.join(name);
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                // A nested repository is skipped whole, as the snapshot
+                // skips it: its state belongs to its own repository, and
+                // copying it would version a checkout whose git state
+                // stays behind.
+                let nested = RESERVED_DIR_NAMES
+                    .iter()
+                    .any(|reserved| from.join(reserved).symlink_metadata().is_ok());
+                if nested {
+                    continue;
+                }
+                if ignores.matches_dir(&path) {
+                    continue;
+                }
+                pending.push((from, to, path, ignores.clone()));
+            } else if file_type.is_symlink() {
+                // A symlink versions as a symlink; `fs::copy` would
+                // follow it and flatten the link into a file.
+                if ignores.matches_file(&path) {
+                    continue;
+                }
+                let link = fs::read_link(&from)?;
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                std::os::unix::fs::symlink(&link, &to)?;
+            } else {
+                if ignores.matches_file(&path) {
+                    continue;
+                }
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&from, &to)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The names a working copy reserves, as the snapshot walk reserves them.
+const RESERVED_DIR_NAMES: &[&str] = &[".git", ".jj"];
 
 /// The commit an out-of-band move put the line's target on: `branch`'s
 /// when it names one, git HEAD's otherwise.
