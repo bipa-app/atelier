@@ -35,9 +35,9 @@ Read only the branches the task reaches:
 
 1. Run `atelier manifest` from the workspace root. It names the sources,
    discipline, live sessions, and gate state.
-2. Open a session with one honest sentence on what and why. Use
-   `atelier run --summary "…" -- <agent-or-command>` for one command, or
-   `atelier session open --summary "…"` for a durable working copy.
+2. Open a session with one honest sentence on what and why. CLI agents pass
+   `--actor-name "coding-agent" --actor-kind agent`; use `atelier run ... --`
+   for one command or `atelier session open ...` for a durable working copy.
 3. Work only in the printed session working copy. Normal file tools, builds,
    and tests work there.
 4. Review with `atelier session diff <session>` or the MCP `diff` tool.

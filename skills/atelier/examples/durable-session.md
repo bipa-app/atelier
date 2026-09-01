@@ -3,7 +3,8 @@
 ```sh
 cd ~/workspaces/contracts
 atelier manifest
-atelier session open --summary "Update renewal terms and verify the rendered diff"
+atelier session open --actor-name "coding-agent" --actor-kind agent \
+  --summary "Update renewal terms and verify the rendered diff"
 ```
 
 Suppose Atelier prints `s7` and a working-copy path. Use that exact path:

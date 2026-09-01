@@ -7,7 +7,8 @@ Use this branch for edits, builds, tests, and document reads.
 One command or one coding-agent run:
 
 ```sh
-atelier run --summary "Fix request parsing and verify its boundary tests" -- <command> [args...]
+atelier run --actor-name "coding-agent" --actor-kind agent \
+  --summary "Fix request parsing and verify its boundary tests" -- <command> [args...]
 ```
 
 Add `--land` when the command may self-approve and successful completion is
@@ -17,7 +18,8 @@ versioned.
 Several commands or direct file-tool use:
 
 ```sh
-atelier session open --summary "Fix request parsing and verify its boundary tests"
+atelier session open --actor-name "coding-agent" --actor-kind agent \
+  --summary "Fix request parsing and verify its boundary tests"
 # Work only in the printed working-copy path.
 atelier session diff <session>
 atelier land <session>
@@ -25,6 +27,11 @@ atelier land <session>
 
 The working copy is an ordinary directory. Editors, language servers, builds,
 and test runners need no Atelier-specific adapter.
+
+Agents using the CLI must pass both actor flags when they open a session. The
+session persists that actor, so later snapshots, requests, self-approval, and
+landing keep the agent attribution even when those commands run under the
+workstation owner's config.
 
 ## MCP session loop
 

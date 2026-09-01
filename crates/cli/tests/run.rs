@@ -29,6 +29,16 @@ fn stdout(assert: &assert_cmd::assert::Assert) -> String {
     String::from_utf8(assert.get_output().stdout.clone()).expect("stdout is utf-8")
 }
 
+fn session_arc(journal: &str, session: &str) -> Vec<String> {
+    journal
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split("  ").collect();
+            (fields.get(3) == Some(&session)).then(|| format!("{}  {}", fields[1], fields[2]))
+        })
+        .collect()
+}
+
 #[test]
 fn run_carries_edits_into_a_session_not_the_shared_line() {
     let config_home = TempDir::new().expect("create config tempdir");
@@ -86,7 +96,16 @@ fn long_lived_session_supports_normal_tools_diff_and_land() {
     let root = fs::canonicalize(workspace.path()).expect("canonicalize workspace");
 
     let open = ws(config_home.path(), workspace.path())
-        .args(["session", "open", "--summary", "add the notes"])
+        .args([
+            "session",
+            "open",
+            "--summary",
+            "add the notes",
+            "--actor-name",
+            "long-agent",
+            "--actor-kind",
+            "agent",
+        ])
         .assert()
         .success();
     let working_copy = root.join(".atelier/sessions/s1");
@@ -113,6 +132,20 @@ fn long_lived_session_supports_normal_tools_diff_and_land() {
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read landed file"),
         "hello\n"
+    );
+    let journal = ws(config_home.path(), workspace.path())
+        .arg("journal")
+        .assert()
+        .success();
+    assert_eq!(
+        session_arc(&stdout(&journal), "s1"),
+        vec![
+            "long-agent (agent)  land",
+            "long-agent (agent)  approve",
+            "long-agent (agent)  land_request",
+            "long-agent (agent)  snapshot",
+            "long-agent (agent)  session_open",
+        ]
     );
 }
 
@@ -163,7 +196,18 @@ fn run_land_lands_the_change_on_success() {
         .success();
 
     let run = ws(config_home.path(), workspace.path())
-        .args(["run", "--land", "--", "sh", "-c", "echo done > a.txt"])
+        .args([
+            "run",
+            "--land",
+            "--actor-name",
+            "run-agent",
+            "--actor-kind",
+            "agent",
+            "--",
+            "sh",
+            "-c",
+            "echo done > a.txt",
+        ])
         .assert()
         .success();
     let output = stdout(&run);
@@ -180,10 +224,15 @@ fn run_land_lands_the_change_on_success() {
         .arg("journal")
         .assert()
         .success();
-    let journal = stdout(&journal);
-    assert!(
-        journal.contains("land") && journal.contains("session_open"),
-        "got: {journal}"
+    assert_eq!(
+        session_arc(&stdout(&journal), "s1"),
+        vec![
+            "run-agent (agent)  land",
+            "run-agent (agent)  approve",
+            "run-agent (agent)  land_request",
+            "run-agent (agent)  snapshot",
+            "run-agent (agent)  session_open",
+        ]
     );
 }
 
