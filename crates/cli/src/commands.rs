@@ -1,4 +1,8 @@
 use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +18,35 @@ use clap::{Parser, Subcommand};
 
 const JOURNAL_LIMIT: usize = 100;
 const HISTORY_LIMIT: usize = 100;
+
+#[derive(Debug, PartialEq, Eq)]
+struct LocalGitPreflight {
+    head: String,
+    branch: Option<String>,
+    tracked_modifications: usize,
+    untracked_files: usize,
+    untracked_bytes: u64,
+}
+
+impl LocalGitPreflight {
+    fn is_dirty(&self) -> bool {
+        self.tracked_modifications > 0 || self.untracked_files > 0
+    }
+
+    fn lines(&self) -> [String; 2] {
+        let branch = match &self.branch {
+            Some(branch) => branch.as_str(),
+            None => "detached",
+        };
+        [
+            format!("source git: HEAD {}; branch {branch}", self.head),
+            format!(
+                "source git state: tracked modifications: {}; untracked files: {}; estimated untracked bytes: {}",
+                self.tracked_modifications, self.untracked_files, self.untracked_bytes
+            ),
+        ]
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,6 +71,9 @@ enum Command {
         /// Mount the source at this name with its own engine and history.
         #[arg(long)]
         mount: Option<String>,
+        /// Adopt tracked and untracked changes from a dirty local Git source.
+        #[arg(long)]
+        allow_dirty: bool,
     },
     /// Show what this workspace is: sources, discipline, live state, and
     /// the loop it expects. The first thing an actor reads.
@@ -159,7 +195,11 @@ enum SessionCommand {
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
     match cli.command {
         Command::Init { path } => init(path),
-        Command::Attach { source, mount } => attach(&source, mount.as_deref()),
+        Command::Attach {
+            source,
+            mount,
+            allow_dirty,
+        } => attach(&source, mount.as_deref(), allow_dirty),
         Command::Manifest => manifest(),
         Command::Status => status(),
         Command::Diff => diff(),
@@ -244,7 +284,26 @@ fn update() -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
+fn attach(source: &str, mount: Option<&str>, allow_dirty: bool) -> Result<Vec<String>> {
+    let source_path = Path::new(source);
+    if !atelier_sdk::is_remote_url(source)
+        && let Some(preflight) = local_git_preflight(source_path)?
+    {
+        for line in preflight.lines() {
+            println!("{line}");
+        }
+        io::stdout().flush().context("flush source preflight")?;
+        if preflight.is_dirty() && !allow_dirty {
+            bail!(
+                "local Git source is dirty; attach a clean clone or pass --allow-dirty to adopt these changes"
+            );
+        }
+        if preflight.is_dirty() {
+            println!("warning: --allow-dirty adopts the reported tracked and untracked changes");
+            io::stdout().flush().context("flush source warning")?;
+        }
+    }
+
     let root = env::current_dir().context("read the current directory")?;
     let mut workspace = Workspace::open(root)?;
     let attached = if atelier_sdk::is_remote_url(source) {
@@ -254,8 +313,8 @@ fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
         workspace.attach_remote(source, name)?
     } else {
         match mount {
-            Some(name) => workspace.attach_mount(Path::new(source), name)?,
-            None => workspace.attach(Path::new(source))?,
+            Some(name) => workspace.attach_mount(source_path, name)?,
+            None => workspace.attach(source_path)?,
         }
     };
 
@@ -268,6 +327,106 @@ fn attach(source: &str, mount: Option<&str>) -> Result<Vec<String>> {
         None => format!("attached {} {}", attached.kind, attached.path.display()),
     };
     Ok(vec![line])
+}
+
+fn local_git_preflight(source: &Path) -> Result<Option<LocalGitPreflight>> {
+    if !source.join(".git").is_dir() {
+        return Ok(None);
+    }
+    let head = git_text(source, &["rev-parse", "--verify", "HEAD"])?;
+    let branch = git_branch(source)?;
+    let status_output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(source)
+        .output()
+        .context("inspect source Git state")?;
+    if !status_output.status.success() {
+        bail!(
+            "inspect source Git state: {}",
+            String::from_utf8_lossy(&status_output.stderr).trim()
+        );
+    }
+
+    let mut tracked_modifications = 0;
+    let mut untracked_files = 0;
+    let mut untracked_bytes = 0_u64;
+    let mut skip_rename_source = false;
+    for record in status_output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        if skip_rename_source {
+            skip_rename_source = false;
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            bail!("inspect source Git state: malformed porcelain record");
+        }
+        if &record[..2] == b"??" {
+            untracked_files += 1;
+            let path = source.join(Path::new(OsStr::from_bytes(&record[3..])));
+            let bytes = fs::symlink_metadata(&path)
+                .with_context(|| format!("measure untracked source path {}", path.display()))?
+                .len();
+            untracked_bytes = untracked_bytes
+                .checked_add(bytes)
+                .context("estimated untracked source bytes overflowed u64")?;
+        } else {
+            tracked_modifications += 1;
+            skip_rename_source =
+                matches!(record[0], b'R' | b'C') || matches!(record[1], b'R' | b'C');
+        }
+    }
+
+    Ok(Some(LocalGitPreflight {
+        head,
+        branch,
+        tracked_modifications,
+        untracked_files,
+        untracked_bytes,
+    }))
+}
+
+fn git_branch(source: &Path) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(source)
+        .output()
+        .context("inspect source Git branch")?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8(output.stdout)
+                .context("source Git branch is not UTF-8")?
+                .trim()
+                .to_owned(),
+        ));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    bail!(
+        "inspect source Git branch: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn git_text(source: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(source)
+        .output()
+        .with_context(|| format!("inspect source Git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "inspect source Git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("source Git output is not UTF-8")?
+        .trim()
+        .to_owned())
 }
 
 fn manifest() -> Result<Vec<String>> {
