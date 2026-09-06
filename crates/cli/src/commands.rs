@@ -89,6 +89,11 @@ enum Command {
     /// Attach a source: a local folder (imported into the root, or — with
     /// --mount — as a mounted source), or a bucket URL (s3://, gs://,
     /// az://), which always mounts (ADR-0012).
+    ///
+    /// Local Git sources must own their .git directory. Linked worktrees
+    /// and submodule checkouts do not attach directly. Clone their committed
+    /// HEAD first with git clone --no-local --single-branch -- <worktree>
+    /// <new-source>, then attach <new-source> with --mount <name>.
     Attach {
         source: String,
         /// Mount the source at this name with its own engine and history.

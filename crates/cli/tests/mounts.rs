@@ -243,3 +243,117 @@ fn dirty_git_sources_refuse_until_the_actor_accepts_the_preflight() {
         b"123456"
     );
 }
+
+#[test]
+fn linked_worktrees_refuse_with_a_clone_route_that_keeps_their_committed_head() {
+    for bare_owner in [false, true] {
+        let fixture = TempDir::new().expect("create fixture");
+        let fixture_root = fixture
+            .path()
+            .canonicalize()
+            .expect("canonical fixture path");
+        let config_home = fixture_root.join("config");
+        write_actor_config(&config_home);
+        let workspace = fixture_root.join("workspace");
+        fs::create_dir(&workspace).expect("create workspace");
+        atelier(&config_home, &workspace)
+            .arg("init")
+            .assert()
+            .success();
+
+        let source = fixture_root.join("source");
+        fs::create_dir(&source).expect("create source");
+        git(&source, &["init", "-q", "-b", "main"]);
+        fs::write(source.join("branch.txt"), "main content\n").expect("write main content");
+        git(&source, &["add", "branch.txt"]);
+        git(&source, &["commit", "-qm", "main content"]);
+        let owner = if bare_owner {
+            git(&fixture_root, &["clone", "--bare", "source", "owner.git"]);
+            fixture_root.join("owner.git")
+        } else {
+            source.clone()
+        };
+        let linked = fixture_root.join("card-worktree");
+        git(
+            &owner,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "example",
+                linked.to_str().expect("utf-8 linked path"),
+            ],
+        );
+        fs::write(linked.join("branch.txt"), "card content\n").expect("write card content");
+        git(&linked, &["commit", "-am", "card content"]);
+        let head = git(&linked, &["rev-parse", "HEAD"]);
+        let error = if bare_owner {
+            format!(
+                "error: config error: {} carries a .git file pointing at {}; only a repository owning its .git directory attaches; clone the committed HEAD first: git clone --no-local --single-branch -- <worktree> <new-source>, then atelier attach <new-source> --mount <name>; cloning does not copy uncommitted edits\n",
+                linked.display(),
+                owner.join("worktrees/card-worktree").display()
+            )
+        } else {
+            format!(
+                "error: {} is a linked git worktree of {}; linked worktrees must be cloned before attachment: git clone --no-local --single-branch -- <worktree> <new-source>, then atelier attach <new-source> --mount <name>; cloning copies the worktree's committed HEAD, not uncommitted edits\n",
+                linked.display(),
+                owner.display()
+            )
+        };
+        atelier(&config_home, &workspace)
+            .args([
+                "attach",
+                linked.to_str().expect("utf-8 linked path"),
+                "--mount",
+                "app",
+            ])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(error);
+        assert!(!workspace.join("app").exists());
+        assert_eq!(git(&source, &["show", "main:branch.txt"]), "main content");
+        fs::write(linked.join("branch.txt"), "uncommitted content\n")
+            .expect("write an edit outside the clone contract");
+
+        git(
+            &fixture_root,
+            &[
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--",
+                "card-worktree",
+                "card-source",
+            ],
+        );
+        let standalone = fixture_root.join("card-source");
+        assert!(standalone.join(".git").is_dir());
+        assert!(!standalone.join(".git/objects/info/alternates").exists());
+        assert_eq!(git(&standalone, &["branch", "--show-current"]), "example");
+        assert_eq!(git(&standalone, &["rev-parse", "HEAD"]), head);
+        atelier(&config_home, &workspace)
+            .args([
+                "attach",
+                standalone.to_str().expect("utf-8 standalone path"),
+                "--mount",
+                "app",
+            ])
+            .assert()
+            .success()
+            .stdout(format!(
+                "source git: HEAD {head}; branch example\nsource git state: tracked modifications: 0; untracked files: 0; estimated untracked bytes: 0\nattached local-git {} at app\n",
+                standalone.display()
+            ))
+            .stderr("");
+        assert!(!workspace.join("app/.git/objects/info/alternates").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.join("app/branch.txt")).expect("read attached content"),
+            "card content\n"
+        );
+        assert_eq!(
+            fs::read_to_string(linked.join("branch.txt")).expect("read original edit"),
+            "uncommitted content\n"
+        );
+    }
+}

@@ -1679,8 +1679,24 @@ impl Workspace {
         };
         let target = match entry.kind {
             SourceKind::LocalGit => {
+                let repository = fs::canonicalize(self.root.join(mount))?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| {
+                        Error::Config("the mounted git repository path is not utf-8".to_owned())
+                    })?;
+                let repository_arg = repository.replace('\'', "'\\''");
+                let git_ref = format!(
+                    "refs/heads/{}",
+                    entry.branch.as_deref().unwrap_or(LANDED_BOOKMARK)
+                );
+                let refspec = format!("{git_ref}:{git_ref}").replace('\'', "'\\''");
+                let original = self.origin_path(&entry.path).display().to_string();
                 return Err(Error::Config(format!(
-                    "{mount:?} is a git source; landed work publishes with plain git push"
+                    "{mount:?} is a git source; the original clone at {original:?} remains unchanged.\n\
+                     Landings update {git_ref:?} in the mounted repository at {repository:?}.\n\
+                     Publish with:\n  git -C '{repository_arg}' push -- '<remote>' '{refspec}'\n\
+                     Replace <remote> with a remote name or URL; list configured remotes with:\n  git -C '{repository_arg}' remote -v"
                 )));
             }
             SourceKind::LocalFolder => SyncTarget::Folder(self.origin_path(&entry.path)),
@@ -2515,7 +2531,7 @@ fn refuse_shared_checkout(folder: &Path) -> Result<(), Error> {
         });
     }
     Err(Error::Config(format!(
-        "{} carries a .git file pointing at {gitdir}; only a repository owning its .git directory attaches",
+        "{} carries a .git file pointing at {gitdir}; only a repository owning its .git directory attaches; clone the committed HEAD first: git clone --no-local --single-branch -- <worktree> <new-source>, then atelier attach <new-source> --mount <name>; cloning does not copy uncommitted edits",
         folder.display()
     )))
 }
