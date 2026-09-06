@@ -41,7 +41,7 @@ pub enum Error {
     /// `attach` refused: the folder is a linked git worktree whose
     /// state its repository owns; only the repository attaches whole.
     #[error(
-        "{folder} is a linked git worktree of {repository}; attach the repository itself: atelier attach {repository} --mount <name>"
+        "{folder} is a linked git worktree of {repository}; linked worktrees must be cloned before attachment: git clone --no-local --single-branch -- <worktree> <new-source>, then atelier attach <new-source> --mount <name>; cloning copies the worktree's committed HEAD, not uncommitted edits"
     )]
     LinkedWorktreeUnsupported {
         /// The linked worktree that was offered as a source.

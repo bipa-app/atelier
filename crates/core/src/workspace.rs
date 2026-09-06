@@ -2515,7 +2515,7 @@ fn refuse_shared_checkout(folder: &Path) -> Result<(), Error> {
         });
     }
     Err(Error::Config(format!(
-        "{} carries a .git file pointing at {gitdir}; only a repository owning its .git directory attaches",
+        "{} carries a .git file pointing at {gitdir}; only a repository owning its .git directory attaches; clone the committed HEAD first: git clone --no-local --single-branch -- <worktree> <new-source>, then atelier attach <new-source> --mount <name>; cloning does not copy uncommitted edits",
         folder.display()
     )))
 }

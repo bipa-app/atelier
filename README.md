@@ -88,6 +88,24 @@ From there:
 - `atelier serve --mcp-stdio` — serve the workspace to agents over MCP: sessions, diffs, gated landing, journal.
 - `atelier sessions` / `atelier requests` / `atelier approve <id>` — review and land an agent's change.
 
+## Git sources and linked worktrees
+
+Linked Git worktrees and submodule checkouts do not own their `.git`
+directory and cannot attach directly. First clone the worktree's committed
+HEAD into a standalone source:
+
+```sh
+git clone --no-local --single-branch -- /path/to/card-worktree /tmp/card-source
+atelier attach /tmp/card-source --mount app
+```
+
+This keeps the worktree's branch and committed content. Commit any edits you
+want to carry over before cloning. `--no-local` copies the objects without
+depending on the original repository's object store; avoid `--shared`.
+The clone's `origin` points at the worktree. To publish elsewhere, set the
+remote in the mount to the intended URL with
+`git -C app remote set-url origin <url>`, then publish from the mount.
+
 ## The SDK
 
 Everything the CLI does, the `atelier-sdk` crate does directly:
