@@ -1,11 +1,13 @@
 # Wiring coding agents to atelier
 
-atelier is adopted when agents *work inside a workspace* — not beside one. `attach`
-copies; sync-back is a later slice. So the workspace is the working location: attach
-your project as a mount (a git repo is adopted with its history and stays a real
-repo), work through sessions, land through the gate. Every landing moves the
-adopted branch (or the `atelier` bookmark), so plain `git push` from a mount
-publishes the newest shared line.
+Agents work in sessions inside an atelier workspace. `attach` copies a source
+into its mount; a Git source keeps its history and stays a real repository.
+Every landing moves the adopted branch (or `atelier` for detached adoption)
+inside that mount. Publish from the mount with an explicit refspec, for example
+`git -C app push origin refs/heads/main:refs/heads/main`. The original Git clone
+stays unchanged. Folder sources mirror back on landing under the sync guard.
+See [Git source setup and publishing](../README.md#git-sources-and-linked-worktrees)
+for linked worktrees, remote setup, and branch selection.
 
 Every harness below needs the same three things:
 

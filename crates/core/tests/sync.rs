@@ -223,8 +223,21 @@ fn git_sources_never_sync_back() {
 
     // The sync verb refuses git sources by name.
     let error = ws.sync(Some("sdk"), false).unwrap_err();
-    assert!(
-        matches!(&error, Error::Config(message) if message.contains("git source")),
-        "got: {error:?}"
+    let Error::Config(message) = error else {
+        panic!("expected a config error, got {error:?}");
+    };
+    let repository = fs::canonicalize(root.path().join("sdk")).unwrap();
+    assert_eq!(
+        message,
+        format!(
+            "\"sdk\" is a git source; the original clone at {:?} remains unchanged.\n\
+             Landings update \"refs/heads/master\" in the mounted repository at {repository:?}.\n\
+             Publish with:\n  git -C '{}' push -- '<remote>' 'refs/heads/master:refs/heads/master'\n\
+             Replace <remote> with a remote name or URL; list configured remotes with:\n  git -C '{}' remote -v",
+            repo.path().to_str().unwrap(),
+            repository.display(),
+            repository.display(),
+            repository = repository.to_str().unwrap()
+        )
     );
 }

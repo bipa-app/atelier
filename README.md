@@ -90,6 +90,25 @@ From there:
 
 ## Git sources and linked worktrees
 
+Attach a local Git source at a named mount. Atelier copies its history into
+that mount; after a session lands, publish from the mount. The original clone
+stays unchanged.
+
+For a source on branch `main`, mounted at `app`:
+
+```sh
+atelier attach /path/to/source --mount app
+# Open a session, edit its working copy, and land it.
+git -C app remote -v
+git -C app push origin refs/heads/main:refs/heads/main
+```
+
+Use your remote name or URL in place of `origin`, and the branch checked out
+at attachment in place of `main`. A source attached with detached HEAD uses
+`refs/heads/atelier`. Landing leaves the mount's HEAD detached, so pass the
+full refspec shown above. `atelier sync app` names the mount and ref to
+publish; it mirrors folder sources only.
+
 Linked Git worktrees and submodule checkouts do not own their `.git`
 directory and cannot attach directly. First clone the worktree's committed
 HEAD into a standalone source:
