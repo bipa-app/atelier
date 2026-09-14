@@ -202,6 +202,79 @@ fn an_agent_authored_commit_carries_the_publishing_committer() {
 }
 
 #[test]
+fn publisher_author_policy_keeps_agent_journal_and_verified_signing() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    let (key, signer_line) = generate_key(config.path(), "owner@example.test");
+    set_config(
+        config.path(),
+        &format!(
+            "[actor]\nname = \"owner\"\nkind = \"human\"\n\n\
+             [git]\nname = \"Workspace Owner\"\nemail = \"owner@example.test\"\n\
+             author = \"publisher\"\n\n\
+             [git.signing]\nbackend = \"ssh\"\nkey = \"{key}\"\n"
+        ),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let mut workspace = Workspace::init(root.path()).unwrap();
+    land_note(&mut workspace, &agent("build-agent"), "note.txt");
+    assert_eq!(
+        git(
+            root.path(),
+            &[
+                "log",
+                "-1",
+                "--format=%an %ae %cn %ce",
+                "refs/heads/atelier"
+            ]
+        ),
+        "Workspace Owner owner@example.test Workspace Owner owner@example.test"
+    );
+    let journal = workspace.journal(100).unwrap();
+    let opened = journal
+        .iter()
+        .find(|entry| entry.instruction_summary.as_deref() == Some("land the note"))
+        .unwrap();
+    assert_eq!(opened.actor_name, "build-agent");
+    assert_eq!(opened.actor_kind, ActorKind::Agent);
+    assert_eq!(
+        workspace.log(1).unwrap()[0].snapshot.actor,
+        "Workspace Owner"
+    );
+    let signers = config.path().join("allowed_signers");
+    fs::write(&signers, signer_line).unwrap();
+    assert_eq!(
+        git(
+            root.path(),
+            &[
+                "-c",
+                &format!("gpg.ssh.allowedSignersFile={}", signers.display()),
+                "log",
+                "-1",
+                "--format=%G?",
+                "refs/heads/atelier",
+            ]
+        ),
+        "G"
+    );
+}
+
+#[test]
+fn unknown_author_policy_refuses_before_git_history_creation() {
+    let _guard = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    set_config(
+        config.path(),
+        "[actor]\nname = \"owner\"\nkind = \"human\"\n\
+         [git]\nname = \"Owner\"\nemail = \"owner@example.test\"\nauthor = \"unknown\"\n",
+    );
+    let root = tempfile::tempdir().unwrap();
+    let result = Workspace::init(root.path());
+    assert!(result.is_err());
+    assert!(!root.path().join(".git").exists());
+}
+
+#[test]
 fn without_an_identity_the_synthetic_address_stands_unsigned() {
     let _guard = env_lock();
     let config = tempfile::tempdir().unwrap();

@@ -84,6 +84,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Print supported integration features as JSON without opening a workspace.
+    Capabilities,
     /// Initialize a workspace.
     Init { path: Option<PathBuf> },
     /// Attach a source: a local folder (imported into the root, or — with
@@ -226,6 +228,9 @@ enum SessionCommand {
 
 pub fn execute(cli: Cli) -> Result<Vec<String>> {
     match cli.command {
+        Command::Capabilities => Ok(vec![
+            r#"{"schema":1,"features":["git-author-publisher"]}"#.to_owned(),
+        ]),
         Command::Init { path } => init(path),
         Command::Attach {
             source,
