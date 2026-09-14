@@ -209,7 +209,13 @@ With `[git]` configured the identity is the committer of every commit atelier wr
 Set `[git] author = "publisher"` to use the configured human identity as Git author
 as well as committer. The default is `author = "actor"`. Both keep configured
 signing and honest actor attribution in the journal; adopted history is unchanged
-(ADR-0016).
+(ADR-0016). `Snapshot.actor` and `atelier history` report the Git author's display
+name, so they show the publisher under this policy. The journal records the actor
+who directed each act.
+
+`atelier capabilities` is a read-only, workspace-independent compatibility probe:
+`{"schema":1,"features":["git-author-publisher"]}`. Clients must require that feature
+before writing the option; an older release can silently ignore unknown fields.
 
 
 Schema versioning from day one: `schema = 1`; SQLite `user_version` for the journal; `manifest` reports surface version.

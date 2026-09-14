@@ -7,7 +7,11 @@ agent or automation acted and on whose instruction.
 `[git] author = "publisher"` makes new engine commits use the configured publishing
 identity as author. The default, `author = "actor"`, keeps ADR-0015's behavior.
 Both policies keep the publishing committer and configured signing. Neither changes
-the actor, session ownership, journal records, landing approvals, or adopted history.
+the session actor, session ownership, journal records, landing approvals, or adopted history.
+
+`Snapshot.actor` and the CLI history column report the Git author's name. Under
+publisher policy they therefore show the publisher. The journal remains the record
+of who acted; history describes content states and their Git attribution.
 
 This adds an explicit option to ADR-0015, which rejected making publisher authorship
 the only behavior. Actor authorship remains the default; a repository owner who
@@ -17,3 +21,7 @@ Changing policy affects later engine writes, not existing imported commits.
 The policy is one enum in the existing identity configuration. It adds no storage
 schema, network request, history scan, or dependency. An unknown value refuses
 configuration parsing before the workspace writes a commit.
+
+`atelier capabilities` returns versioned JSON without opening a workspace or
+reading identity configuration. Clients require `git-author-publisher` before
+using this option: older binaries may silently ignore an unknown config field.

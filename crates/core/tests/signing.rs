@@ -237,6 +237,10 @@ fn publisher_author_policy_keeps_agent_journal_and_verified_signing() {
         .unwrap();
     assert_eq!(opened.actor_name, "build-agent");
     assert_eq!(opened.actor_kind, ActorKind::Agent);
+    assert_eq!(
+        workspace.log(1).unwrap()[0].snapshot.actor,
+        "Workspace Owner"
+    );
     let signers = config.path().join("allowed_signers");
     fs::write(&signers, signer_line).unwrap();
     assert_eq!(

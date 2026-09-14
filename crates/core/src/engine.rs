@@ -49,12 +49,13 @@ const _: () = assert!(LADDER_FILE_SIZE_MAX <= NEW_FILE_SIZE_MAX);
 /// history is user-controlled.
 const FOLD_SCAN_MAX: usize = 1000;
 
-/// One immutable whole-workspace state in history, attributed to an actor.
+/// One immutable whole-workspace state in history, carrying its Git author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// The snapshot's stable identity.
     pub id: String,
-    /// The actor the snapshot is attributed to.
+    /// The Git author's display name. Under publisher author policy this is
+    /// the publisher; the journal records the acting actor separately.
     pub actor: String,
     /// When the snapshot was taken, in unix milliseconds.
     pub at_ms: i64,
