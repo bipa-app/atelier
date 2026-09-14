@@ -75,7 +75,17 @@ struct ActorSection {
 struct GitSection {
     name: String,
     email: String,
+    #[serde(default)]
+    author: GitAuthorPolicy,
     signing: Option<SigningSection>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GitAuthorPolicy {
+    #[default]
+    Actor,
+    Publisher,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,13 +95,14 @@ struct SigningSection {
 }
 
 /// The git identity a workspace publishes under (ADR-0015): committer of
-/// every commit the engine writes, author of the owning human's own
-/// commits, and — when signing is configured — the identity whose key
+/// every commit the engine writes, author according to the configured
+/// policy, and — when signing is configured — the identity whose key
 /// vouches for all of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitIdentity {
     pub name: String,
     pub email: String,
+    pub author: GitAuthorPolicy,
     pub signing: Option<Signing>,
 }
 
@@ -150,6 +161,7 @@ pub(crate) fn resolve_git_identity() -> Result<Option<GitIdentity>, Error> {
     Ok(Some(GitIdentity {
         name: section.name,
         email: section.email,
+        author: section.author,
         signing,
     }))
 }

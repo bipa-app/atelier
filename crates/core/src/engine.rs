@@ -28,7 +28,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{Actor, ActorKind, GitIdentity, SigningBackend, resolve_git_identity};
+use crate::config::{
+    Actor, ActorKind, GitAuthorPolicy, GitIdentity, SigningBackend, resolve_git_identity,
+};
 use crate::error::{Error, config_err, engine_err};
 use crate::workspace::SKIP_NAMES;
 
@@ -1254,18 +1256,22 @@ fn build_settings(actor: &Actor, git: Option<&GitIdentity>) -> Result<UserSettin
     UserSettings::from_config(config).map_err(config_err)
 }
 
-/// The author an actor's commits carry: the publishing identity for the
-/// owning human; the synthetic actor address for agents and automations,
-/// so their work stays attributed while the committer — and, when
-/// signing is configured, the signature — remains the identity's
-/// (ADR-0015).
+/// The configured Git author policy applies to new commits; journal
+/// attribution always retains the acting actor (ADR-0016).
 fn author_identity(actor: &Actor, git: Option<&GitIdentity>) -> (String, String) {
-    match (git, actor.kind) {
-        (Some(git), ActorKind::Human) => (git.name.clone(), git.email.clone()),
-        (Some(_) | None, ActorKind::Agent | ActorKind::Automation) | (None, ActorKind::Human) => {
-            (actor.name.clone(), format!("{}@atelier.local", actor.name))
+    if let Some(git) = git {
+        let publisher_authors = match git.author {
+            GitAuthorPolicy::Publisher => true,
+            GitAuthorPolicy::Actor => match actor.kind {
+                ActorKind::Human => true,
+                ActorKind::Agent | ActorKind::Automation => false,
+            },
+        };
+        if publisher_authors {
+            return (git.name.clone(), git.email.clone());
         }
     }
+    (actor.name.clone(), format!("{}@atelier.local", actor.name))
 }
 
 /// A signature stamped now from an author identity.

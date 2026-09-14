@@ -206,6 +206,11 @@ schema = 1
 
 With `[git]` configured the identity is the committer of every commit atelier writes; the owning human authors as the identity, agents author as themselves (`codex@atelier.local`). With `[git.signing]`, everything the engine writes is signed with the identity's key — hosts verify the committer, authorship stays attributed. Without `[git]`: synthetic per-actor addresses, unsigned (ADR-0015).
 
+Set `[git] author = "publisher"` to use the configured human identity as Git author
+as well as committer. The default is `author = "actor"`. Both keep configured
+signing and honest actor attribution in the journal; adopted history is unchanged
+(ADR-0016).
+
 
 Schema versioning from day one: `schema = 1`; SQLite `user_version` for the journal; `manifest` reports surface version.
 
